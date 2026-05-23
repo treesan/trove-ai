@@ -261,8 +261,8 @@ async def list_sync_articles(
 
 
 # Plugin artifacts live under backend/app/static/obsidian-plugin/ — they're the
-# build output of ~/.hermes/hermeswork/trove-sync-obsidian/. We copy them
-# into the backend image at build time so the running backend can serve them.
+# build output of the trove-sync-obsidian repo, copied into the backend image
+# at build time so the running backend can serve them.
 PLUGIN_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "obsidian-plugin")
 PLUGIN_FILES = ["main.js", "manifest.json", "styles.css"]
 
