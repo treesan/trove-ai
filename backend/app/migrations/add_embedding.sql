@@ -1,5 +1,5 @@
 -- Add embedding column for semantic search
-ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector(1536);
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS embedding vector(384);
 
 -- Index for cosine similarity search (ivfflat for performance)
 CREATE INDEX IF NOT EXISTS idx_articles_embedding ON articles 

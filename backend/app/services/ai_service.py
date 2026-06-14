@@ -1,9 +1,15 @@
 import httpx
 import json
 import logging
+import os
 import re
 from typing import Optional, Dict, Any
 from app.config import get_settings
+
+# Use HuggingFace mirror for model downloads (fastembed models ~130MB)
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+from fastembed import TextEmbedding
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
