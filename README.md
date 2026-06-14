@@ -11,6 +11,8 @@
 [![Responsive: PC · Pad · Mobile](https://img.shields.io/badge/Responsive-PC%20·%20Pad%20·%20Mobile-007aff)]()
 [![Status: active](https://img.shields.io/badge/status-active-success.svg)]()
 
+> 🔥 **这是 Simonlin 优化版** ([simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)) — 在原版 [weaiw/trove-ai](https://github.com/weaiw/trove-ai) 基础上增加了 B 站/YouTube 视频 ASR 语音转录、DeepSeek V4-Pro 驱动、UI 配置化等关键能力。详见下方 [Simon Fork 变更](#simon-fork-变更-v11)。
+
 [中文 README](README.zh.md) · [Self-host guide](docs/SELF_HOST.md) · [Obsidian plugin](https://github.com/weaiw/trove-sync-obsidian)
 
 </div>
@@ -46,7 +48,7 @@ Ingestion via: browser bookmark, WeChat Bot, paste, upload (PDF/DOCX/EPUB/etc), 
 <td width="50%" valign="top">
 
 #### 🧠 AI does the work, not you
-Every article gets: AI-extracted title, 5-sentence summary, 3-5 key points, auto-tags, source-aware author extraction, 1024-dim vector embedding, mind-map auto-generation, video transcription.
+Every article gets: AI-extracted title, 5-sentence summary, 3-5 key points, auto-tags, source-aware author extraction, 384-dim vector embedding, mind-map auto-generation. **B 站 / YouTube 视频自动字幕 + ASR 语音转录。**
 
 </td>
 </tr>
@@ -154,6 +156,7 @@ Auto-switching based on OS preference, or pin to your favorite mode. Eye-friendl
 | Self-host | ✅ Docker | ❌ | ✅ (defunct) | ❌ | ✅ Docker | ✅ Docker |
 | **Chinese platforms** | **✅ 6+ deep parsers** | ❌ | Weak | ❌ | Weak | N/A |
 | AI summary | ✅ Any provider | ❌ Basic | ✅ | ✅ | ✅ | ❌ |
+| **Video ASR / transcription** | **✅ B站+YouTube** | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Knowledge graph | ✅ Auto | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Learning paths | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | WeChat Bot | ✅ Built-in | ❌ | ❌ | ❌ | ❌ | ❌ |
@@ -179,9 +182,12 @@ That's it. No Python or Node required on the host.
 ### Steps
 
 ```bash
-# 1. Clone
-git clone https://github.com/weaiw/trove-ai.git
+# 1. Clone (Simon 优化版，含视频 ASR + YouTube + DeepSeek)
+git clone https://github.com/simonlin000/trove-ai.git
 cd trove-ai
+
+# 或原版
+# git clone https://github.com/weaiw/trove-ai.git
 
 # 2. Configure secrets
 cp .env.example .env
@@ -259,7 +265,7 @@ Bring your own reverse proxy (**Caddy / Traefik / Nginx**) for HTTPS, or use Clo
 | Cache | **Redis 7** | Sessions, queues |
 | Crawler | **Playwright** + **curl_cffi** + httpx | Defeats Chinese anti-bot (TLS fingerprint, XHR intercept, JS VM bypass) |
 | LLM | Any **OpenAI-compatible** | DeepSeek, 讯飞星辰, OpenAI, SiliconFlow, MiniMax, 智谱, ... |
-| Embedding | **SiliconFlow bge-m3** (1024-dim) or local fastembed (384-dim) | Cloud quality with local fallback |
+| Embedding | **fastembed bge-small-en-v1.5** (384-dim) or SiliconFlow bge-m3 (1024-dim) | Cloud quality with local fallback |
 | Reverse proxy | **Nginx** | Single ingress, fast static serving |
 
 ---
@@ -339,6 +345,65 @@ The plugin auto-detects already-synced articles via dual-OR (sync_state.json ∪
 - [`docs/SELF_HOST.md`](docs/SELF_HOST.md) — Full self-host guide with troubleshooting
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — How to contribute
 - API docs at `/api/docs` (auto-generated from FastAPI)
+
+
+---
+
+## Simon Fork 变更 (v1.1)
+
+本仓库 ([simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)) 在原版 [weaiw/trove-ai](https://github.com/weaiw/trove-ai) 基础上增加了以下能力：
+
+### 🎬 视频 ASR 语音转录
+
+**B 站 & YouTube 视频 → 完整文字稿。** 三层处理：
+
+1. **字幕抓取** — 有外挂字幕直接扒下来
+2. **ASR 转录** — 没字幕？后台自动下载音频轨道，Whisper (faster-whisper tiny) 转文字
+3. **智能限制** — 默认 30 分钟上限（可在设置页调），防止内存溢出
+
+流程：贴链接 → 秒存文章 → 30 秒内后台扫到标记 → 几分钟后刷新，字幕已在文章底部。
+
+### 📺 YouTube 完整支持
+
+接入 yt-dlp：自动获取标题/频道/简介/封面，优先中文字幕，无字幕走 ASR。只需在设置页填代理地址（国内访问 YouTube 需要）。
+
+### 🧠 DeepSeek V4-Pro 驱动
+
+1.6 万亿参数 MoE 模型（490 亿激活），摘要质量显著提升。不是"本文介绍了XXX"的表面总结，而是提炼核心命题。
+
+### ⚙️ UI 配置化
+
+**设置 → 插件设置**，四个开关随时改：
+
+- YouTube 解析（开/关）
+- 代理地址
+- 语音转录 ASR（开/关）
+- 转录视频上限（默认 1800 秒）
+
+改了立刻生效，不用重启容器。
+
+### 🔄 Obsidian 双向同步
+
+除原版 Trove → Obsidian 拉取外，新增 `POST /api/sync/articles` 端点：Obsidian vault 里的 Markdown 文件可推送回 Trove。按 obsidian_path 去重，支持更新。
+
+### 🐛 关键修复
+
+- **Embedding 向量化修复** — `TextEmbedding` 导入缺失、HuggingFace 国内不可达、向量维度不匹配（1024→384）
+- **双 Worker 竞态条件** — `ASR_RUNNING` 锁防重复转录
+- **临时文件堆积导致磁盘满** — 限制 30 分钟 + 及时清理
+- **长视频 OOM** — 内存保护，超过上限不转录
+
+### 从本仓库部署
+
+```bash
+git clone https://github.com/simonlin000/trove-ai.git
+cd trove-ai
+cp .env.example .env
+# 编辑 .env，至少填 DEEPSEEK_API_KEY 和 SECRET_KEY
+docker compose up -d
+```
+
+打开 http://localhost:80 → 设置 → AI 对话模型 配 DeepSeek → 设置 → 插件设置 配代理 → 开始用。
 
 ---
 
