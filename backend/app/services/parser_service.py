@@ -180,6 +180,10 @@ class ParserService:
         if platform == 'youtube':
             return await self._fetch_youtube(url)
 
+        # P1: 微信公众号 - cgiDataNew 结构化解析, 未命中则 fallback 到通用路径
+        if platform == 'wechat':
+            return await self._fetch_wechat(url)
+
         # P5: 通用网页 - trafilatura 优先,内容过短再 Playwright 渲染,最后 BeautifulSoup 兜底
         # 视频号(channels.weixin.qq.com)、CSDN、掘金、Medium、少数派、36氪 等 JS 动态页同走此路
         return await self._fetch_generic(url, platform)
@@ -240,6 +244,55 @@ class ParserService:
             logger.warning(f"playwright render failed for {url}: {e}")
             return None
 
+    def _inject_wechat_images(self, content_html: str, original_soup: BeautifulSoup) -> str:
+        """微信公众号 trafilatura 提取后补回图片。
+
+        微信公众号图片使用 data-src 懒加载，trafilatura 无法识别。
+        从原始 soup 中提取 #js_content 内的图片，用 data-src 保留原始 URL，
+        交给 clean_to_markdown 阶段统一处理 proxy 转换，避免双重编码。
+        """
+        # 从原始 HTML 提取正文区图片
+        js_content = original_soup.find('div', id='js_content')
+        if not js_content:
+            js_content = original_soup.find('div', class_='rich_media_content')
+        if not js_content:
+            return content_html
+
+        # 收集所有图片（保留 data-src，让 clean_to_markdown 统一处理）
+        images = []
+        for img in js_content.find_all('img'):
+            src = img.get('data-src') or img.get('src', '')
+            if src and 'mmbiz.qpic.cn' in src:
+                images.append(
+                    f'<img data-src="{src}" alt="wechat image" />'
+                )
+
+        if not images:
+            return content_html
+
+        # 在 trafilatura 输出的段落之间插入图片
+        content_soup = BeautifulSoup(content_html, 'lxml')
+        paragraphs = content_soup.find_all('p')
+        if not paragraphs:
+            # 没有段落结构，直接追加图片
+            imgs_html = ''.join(images)
+            return content_html + imgs_html
+
+        # 按段落分布图片
+        img_idx = 0
+        result_parts = []
+        for p in paragraphs:
+            result_parts.append(str(p))
+            if img_idx < len(images):
+                result_parts.append(images[img_idx])
+                img_idx += 1
+        # 剩余图片追加到末尾
+        while img_idx < len(images):
+            result_parts.append(images[img_idx])
+            img_idx += 1
+
+        return '\n'.join(result_parts)
+
     def _build_generic_result(self, html: str, url: str, platform: str) -> Dict:
         """从原始 HTML 构建解析结果:trafilatura 优先,BeautifulSoup 兜底;元数据走 OG/soup。"""
         soup = BeautifulSoup(html, 'lxml')
@@ -247,6 +300,11 @@ class ParserService:
 
         # 1) trafilatura 优先(正文 HTML)
         content_html = self._trafilatura_extract(html, url)
+
+        # 微信公众号图片使用 data-src 懒加载，trafilatura 无法识别。
+        # 在 trafilatura 提取后，从原始 HTML 中补回图片。
+        if platform == 'wechat' and content_html:
+            content_html = self._inject_wechat_images(content_html, soup)
 
         # 2) 回退:BeautifulSoup 启发式清洗 + 提取
         if not content_html or self._text_len(content_html) < self._MIN_CONTENT_CHARS:
@@ -279,8 +337,90 @@ class ParserService:
             'og_meta': og_meta,
         }
 
+    def _render_from_cgi_data(self, cgi: dict, raw_html: str, url: str) -> Dict:
+        """从 cgiDataNew 结构化数据构建解析结果: 元数据 + 按 item_show_type 渲染正文。"""
+        title = cgi.get("title", "") or ""
+        author = cgi.get("nick_name", "") or cgi.get("author", "") or ""
+        publish_time = _extract_publish_time(raw_html, cgi)
+        cover = cgi.get("round_head_img", "") or ""
+
+        is_pay = _to_int(cgi.get("is_pay_subscribe", 0)) == 1
+        item_type = _to_int(cgi.get("item_show_type", 0))
+
+        if is_pay and _is_pay_placeholder(cgi.get("content_noencode", "")):
+            content_html = _render_pay_preview(cgi)
+        elif item_type == 8:
+            content_html = _render_content_type_8(cgi)
+        elif item_type == 10:
+            content_html = _render_content_type_10(cgi)
+        else:
+            content_html = _render_content_type_0(cgi)
+
+        # 封面图走代理 (mmbiz.qpic.cn 防盗链); 正文图片不在渲染阶段预代理,
+        # 交给 clean_to_markdown wechat 分支统一处理 (防双重代理)。
+        cover_proxied = self._proxy_url(cover)
+
+        og_meta = {
+            "title": title,
+            "author": author,
+            "image": cover_proxied,
+            "description": cgi.get("desc", "") or title,
+            "published_time": publish_time,
+            "site_name": "微信公众号",
+        }
+
+        return {
+            "title": title or "Untitled",
+            "raw_html": raw_html,
+            "raw_content": content_html,
+            "platform": "wechat",
+            "author": author,
+            "cover_image": cover_proxied or None,
+            "og_meta": og_meta,
+        }
+
+    async def _fetch_wechat(self, url: str) -> Dict:
+        """微信公众号文章专用抓取流程: cgiDataNew 结构化解析, 未命中则 fallback 到通用路径。"""
+        url = _normalize_wechat_url(url)
+
+        # Step 1: httpx GET 原始 HTML
+        headers = self._get_headers("wechat", url)
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                html = resp.text
+        except Exception as e:
+            logger.warning(f"wechat fetch failed for {url}: {e}")
+            raise
+
+        # Step 2: cgiData 解析 + 校验
+        cgi_data = _parse_cgi_data_new(html)
+        if cgi_data and _validate_cgi_data(cgi_data):
+            result = self._render_from_cgi_data(cgi_data, html, url)
+        else:
+            logger.info(f"cgiDataNew not found/invalid for {url}, falling back to generic extractor")
+            result = self._build_generic_result(html, url, "wechat")
+
+        # Step 3: 内容过短 → Playwright 渲染后重试, 取更长者
+        if self._text_len(result["raw_content"]) < self._MIN_CONTENT_CHARS:
+            rendered = await self._render_with_playwright(url)
+            if rendered:
+                alt_cgi = _parse_cgi_data_new(rendered)
+                if alt_cgi and _validate_cgi_data(alt_cgi):
+                    alt = self._render_from_cgi_data(alt_cgi, rendered, url)
+                else:
+                    alt = self._build_generic_result(rendered, url, "wechat")
+                if self._text_len(alt["raw_content"]) > self._text_len(result["raw_content"]):
+                    result = alt
+
+        return result
+
     async def _fetch_generic(self, url: str, platform: str) -> Dict:
-        """通用网页抓取 + 提取级联。"""
+        """通用网页抓取 + 提取级联。
+
+        微信公众号不再走此路径 (改走 _fetch_wechat 用 cgiDataNew 结构化解析);
+        但 _build_generic_result 仍是 cgiData 未命中/校验失败时的 fallback。"""
         headers = self._get_headers(platform, url)
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             resp = await client.get(url, headers=headers)
@@ -1519,17 +1659,23 @@ class ParserService:
             for img in soup.find_all('img'):
                 src = img.get('data-src') or img.get('data-original') or img.get('src', '')
                 if src and 'mmbiz.qpic.cn' in src:
+                    # 去重守卫 (防双重代理): 已是 proxy URL 则跳过
+                    if src.startswith('/api/images/proxy'):
+                        if not img.get('src'):
+                            img['src'] = src
+                        continue
                     from urllib.parse import quote
                     img['src'] = f"/api/images/proxy?url={quote(src, safe='')}"
                 elif not img.get('src'):
                     img.decompose()
             html_content = str(soup)
 
-        # markdownify: when using convert, don't set strip
+        # markdownify: 配置 code_language_callback 读 <pre data-lang>, 转 ```lang fenced block
         markdown = md_convert(
             html_content,
             heading_style='ATX',
             bullets='-',
+            code_language_callback=_code_lang_callback,
         )
 
         # Clean up excessive whitespace
@@ -1550,6 +1696,10 @@ class ParserService:
                     for img in imgs:
                         src = img.get('data-src') or img.get('src', '')
                         if src and 'mmbiz.qpic.cn' in src:
+                            # 去重守卫 (防双重代理)
+                            if src.startswith('/api/images/proxy'):
+                                paragraphs.append(f'![]({src})')
+                                continue
                             from urllib.parse import quote
                             src = f"/api/images/proxy?url={quote(src, safe='')}"
                             paragraphs.append(f'![]({src})')
@@ -1582,6 +1732,451 @@ class ParserService:
     def estimate_reading_time(self, word_count: int) -> int:
         """Estimate reading time in minutes."""
         return max(1, round(word_count / 300))
+
+
+# ============================================================
+#  WeChat (微信公众号) cgiDataNew 解析器
+# ============================================================
+#  用 window.cgiDataNew 结构化数据替代 trafilatura 通用提取。
+#  参考: wechat-article-exporter (TS, renderer.ts / html.ts) +
+#        wechat-article-to-markdown (Py, 代码块/时间/URL 处理)。
+#  设计文档: https://my.feishu.cn/docx/CVnsdcmqgoRVLYxY6ohcdIVOnVf
+#  关键事实(spike 实证): '0' * 1 归一化后是字符串 "0" 而非 int;
+#  repair_json 在复杂 cgiDataNew 上有损(静默丢 key), 故严格 json.loads 优先;
+#  CJK 内容不能用 .encode('latin1'), 单遍扫描器在 str 层解码转义。
+
+
+def _extract_balanced_blob(html: str, start: int) -> Optional[str]:
+    """从 html[start] (必须是 '{') 开始, 字符串感知地扫描到配对的 '}'。
+    跳过单/双引号字符串内的花括号与转义字符。返回含两端花括号的子串, 失败返回 None。"""
+    depth = 0
+    in_string = False
+    escape = False
+    quote_char = None
+    end = -1
+    limit = min(len(html), start + 5_000_000)
+    for i in range(start, limit):
+        c = html[i]
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c in ('"', "'") and not in_string:
+            in_string = True
+            quote_char = c
+            continue
+        if in_string and c == quote_char:
+            in_string = False
+            quote_char = None
+            continue
+        if in_string:
+            continue
+        if c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
+        return None
+    return html[start:end + 1]
+
+
+def _decode_js_string(s: str) -> str:
+    """解码 JS 字符串体(不含外层引号): \\xNN / \\uNNNN / \\n\\t\\r\\\\\\' 等,
+    CJK 原样保留。不用 .encode('latin1')(CJK 会 UnicodeEncodeError)。"""
+    out = []
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i]
+        if c == '\\' and i + 1 < n:
+            nxt = s[i + 1]
+            if nxt == 'x' and i + 3 < n:
+                try:
+                    out.append(chr(int(s[i + 2:i + 4], 16)))
+                    i += 4
+                    continue
+                except ValueError:
+                    pass
+            if nxt == 'u' and i + 5 < n:
+                try:
+                    out.append(chr(int(s[i + 2:i + 6], 16)))
+                    i += 6
+                    continue
+                except ValueError:
+                    pass
+            mp = {'n': '\n', 't': '\t', 'r': '\r', '\\': '\\',
+                  "'": "'", '"': '"', '/': '/', 'b': '\b', 'f': '\f', '0': '\0'}
+            out.append(mp.get(nxt, nxt))
+            i += 2
+            continue
+        out.append(c)
+        i += 1
+    return ''.join(out)
+
+
+def _normalize_cgi_literal(blob: str) -> str:
+    """单遍扫描: 把 cgiDataNew JS 对象字面量归一化为合法 JSON 字符串。
+    - 裸 key (foo:) → "foo":
+    - 单引号字符串 → 双引号 JSON 字符串, 同时解码 \\xNN/\\uNNNN/转义, 保留 CJK
+    - 双引号字符串原样保留
+    - 剥 JsDecode( 包装 与 'X' * 1 中的 " * 1"
+    不使用 .encode('latin1') (CJK 会崩)。"""
+    out = []
+    i = 0
+    n = len(blob)
+    in_str = False
+    str_buf = []
+    bare_key = re.compile(r'([A-Za-z_$][\w$]*)\s*:')
+    # JsDecode('...') 包装: 剥掉 JsDecode( 后需在串结束后吃掉配对的 )
+    pending_close_paren = False
+
+    while i < n:
+        c = blob[i]
+        if not in_str:
+            if c == "'":                       # 单引号串开始
+                in_str = True
+                str_buf = []
+                i += 1
+                continue
+            if c == '"':                       # 双引号串原样保留
+                j = i + 1
+                while j < n:
+                    if blob[j] == '\\' and j + 1 < n:
+                        j += 2
+                        continue
+                    if blob[j] == '"':
+                        break
+                    j += 1
+                out.append(blob[i:j + 1])
+                i = j + 1
+                continue
+            if blob[i:i + 9] == 'JsDecode(':   # 剥 JsDecode( 包装, 标记待吃 )
+                i += 9
+                pending_close_paren = True
+                continue
+            if c == '*':                       # 剥 'X' * 1 中的 " * 1"
+                mm = re.match(r'\*\s*1\b', blob[i:])
+                if mm:
+                    i += mm.end()
+                    continue
+            km = bare_key.match(blob, i)        # 裸 key 加引号
+            if km:
+                out.append(json.dumps(km.group(1)) + ':')
+                i = km.end()
+                continue
+            out.append(c)
+            i += 1
+            continue
+        else:                                   # 单引号串内
+            if c == '\\' and i + 1 < n:
+                str_buf.append(blob[i:i + 2])
+                i += 2
+                continue
+            if c == "'":                        # 串结束: 解码转义后 json.dumps
+                decoded = _decode_js_string(''.join(str_buf))
+                out.append(json.dumps(decoded, ensure_ascii=False))
+                in_str = False
+                str_buf = []
+                i += 1
+                # JsDecode('...') 的配对 ): 跳过空白后吃掉一个 )
+                if pending_close_paren:
+                    while i < n and blob[i] in ' \t\r\n':
+                        i += 1
+                    if i < n and blob[i] == ')':
+                        i += 1
+                    pending_close_paren = False
+                continue
+            str_buf.append(c)
+            i += 1
+    return ''.join(out)
+
+
+def _parse_cgi_data_new(html: str) -> Optional[dict]:
+    """从微信文章 HTML 中提取 window.cgiDataNew 对象。
+    归一化 → 剥 JS 尾逗号 → 严格 json.loads → 失败才回退 json_repair。"""
+    m = re.search(r'(?:window\.)?cgiDataNew\s*=\s*\{', html)
+    if not m:
+        return None
+    start = m.start() + m.group(0).rfind('{')
+    blob = _extract_balanced_blob(html, start)
+    if not blob:
+        return None
+
+    normalized = _normalize_cgi_literal(blob)
+    # 剥 JS 尾逗号 (, } 或 , ]) → 合法 JSON
+    cleaned = re.sub(r',(\s*[}\]])', r'\1', normalized)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # 仅在严格解析失败时才回退 json_repair (有损兜底)
+    try:
+        from json_repair import repair_json
+        return json.loads(repair_json(normalized, return_objects=False))
+    except Exception as e:
+        logger.warning(f"cgiDataNew parse failed: {e}")
+        return None
+
+
+def _validate_cgi_data(cgi: dict) -> bool:
+    """cgiData 解析结果校验: 防 silent corruption (解析成功但内容残缺)。
+    非空 title + content_noencode 达到合理长度才视为命中。"""
+    if not isinstance(cgi, dict):
+        return False
+    title = cgi.get("title", "")
+    content = cgi.get("content_noencode", "") or ""
+    # type=8/10 的正文不在 content_noencode, 放宽: 有 title 且有任一正文来源即可
+    if not title:
+        return False
+    if len(content) >= 20:
+        return True
+    # 图片分享/文本分享: 检查对应字段
+    if cgi.get("picture_page_info_list") or cgi.get("text_page_info"):
+        return True
+    return False
+
+
+def _to_int(val, default: int = 0) -> int:
+    """安全转 int: 兼容 '0'/'1'/int/None ('0' * 1 归一化后是字符串)。"""
+    try:
+        if val in (None, ""):
+            return default
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _format_timestamp(val) -> str:
+    """Unix 时间戳(秒) → 'YYYY-MM-DD HH:mm:ss' (UTC+8)。"""
+    try:
+        ts = int(val)
+        if ts > 0:
+            from datetime import datetime, timezone, timedelta
+            tz = timezone(timedelta(hours=8))
+            return datetime.fromtimestamp(ts, tz=tz).strftime("%Y-%m-%d %H:%M:%S")
+    except (ValueError, OSError):
+        pass
+    return str(val)
+
+
+def _extract_publish_time(html: str, cgi: dict) -> str:
+    """从 cgiData 或 HTML 中提取发布时间, 兼容多种格式。
+    优先 cgi.create_time (新格式已是可读字符串如 '2026-06-11 11:29')。"""
+    val = cgi.get("create_time", "") if isinstance(cgi, dict) else ""
+    if val:
+        if isinstance(val, str) and val.isdigit() and len(val) == 10:
+            return _format_timestamp(int(val))
+        return str(val)
+
+    # fallback: ori_create_time (Unix 时间戳字符串)
+    ori = cgi.get("ori_create_time", "") if isinstance(cgi, dict) else ""
+    if ori and str(ori).isdigit() and len(str(ori)) == 10:
+        return _format_timestamp(int(ori))
+
+    # fallback: 从 HTML 脚本中正则提取 (兼容 JsDecode 历史格式)
+    patterns = [
+        r"create_time\s*:\s*JsDecode\('([^']+)'\)",
+        r"create_time\s*:\s*'(\d+)'",
+        r'create_time\s*[:=]\s*["\']?(\d+)["\']?',
+    ]
+    for p in patterns:
+        m = re.search(p, html)
+        if m:
+            v = m.group(1)
+            if v.isdigit() and len(v) == 10:
+                return _format_timestamp(int(v))
+            return v
+    return ""
+
+
+def _normalize_wechat_url(raw: str) -> str:
+    """清理用户粘贴的微信文章 URL: 剥引号、去反斜杠转义、HTML unescape、强制 https。"""
+    s = str(raw or "").strip()
+    if not s:
+        return s
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    s = re.sub(r"\\+([:/&?=#%])", r"\1", s)
+    import html as html_mod
+    s = html_mod.unescape(s)
+    if "mp.weixin.qq.com" in s and not s.startswith("https://"):
+        if s.startswith("http://"):
+            s = "https://" + s[len("http://"):]
+        else:
+            s = "https://" + s.lstrip("/")
+    return s
+
+
+def _normalize_code_snippets(soup: BeautifulSoup) -> None:
+    """把微信代码块归一化为 <pre data-lang><code>, 供 markdownify 的
+    code_language_callback 转成 ```lang fenced block。
+
+    覆盖两种微信代码块容器:
+    1. .code-snippet__fix (原生代码块, <pre data-lang>): 剥行号, 跳过 CSS counter 泄漏行
+    2. mdnice 风格 <section style="background-color:#1e1e1e..."><code style="display:block">
+       (<span leaf=""> + <br/> 分行, 无 data-lang): 深/纯色背景 section 包块级 code"""
+    # 1) .code-snippet__fix 原生代码块
+    for el in soup.select(".code-snippet__fix"):
+        for line_idx in el.select(".code-snippet__line-index"):
+            line_idx.decompose()
+
+        pre = el.select_one("pre[data-lang]")
+        lang = pre.get("data-lang", "") if pre else ""
+
+        lines = []
+        for code_tag in el.find_all("code"):
+            text = code_tag.get_text()
+            # 跳过 CSS counter 泄漏的垃圾行 (如 "counter(line ...")
+            if re.match(r"^[ce]?ounter\(line", text):
+                continue
+            lines.append(text)
+        code_text = "\n".join(lines) if lines else el.get_text()
+
+        new_pre = soup.new_tag("pre", attrs={"data-lang": lang})
+        new_code = soup.new_tag("code")
+        new_code.string = code_text
+        new_pre.append(new_code)
+        el.replace_with(new_pre)
+
+    # 2) mdnice 风格代码块: <section style="background-color:..."><code style="display:block">
+    #    (无 .code-snippet__fix, 无 <pre data-lang>; 内容用 <span leaf=""> + <br/> 分行)
+    for section in soup.find_all("section"):
+        if not _is_mdnice_code_section(section):
+            continue
+        code = section.find("code")
+        if code is None:
+            continue
+        # <br/> → 换行, 再 get_text 取纯文本 (保留 <span leaf=""> 内文本)
+        for br in code.find_all("br"):
+            br.replace_with("\n")
+        code_text = code.get_text()
+        # 去掉每行统一的前导缩进 (mdnice 常给整块代码加 4 空格), 仅在所有非空行都有相同
+        # 前导空格时才去除, 避免破坏作者有意的缩进
+        code_text = _strip_common_indent(code_text)
+
+        new_pre = soup.new_tag("pre")  # 无 data-lang (mdnice 代码块不带语言)
+        new_code = soup.new_tag("code")
+        new_code.string = code_text
+        new_pre.append(new_code)
+        section.replace_with(new_pre)
+
+
+def _is_mdnice_code_section(section) -> bool:
+    """判断 <section> 是否为 mdnice 风格代码块容器:
+    有 background-color 样式 + 直接含一个块级 <code> (display:block 或 monospace 字体)。"""
+    style = (section.get("style") or "").lower()
+    if "background-color" not in style:
+        return False
+    code = section.find("code")
+    if code is None:
+        return False
+    code_style = (code.get("style") or "").lower()
+    return ("display: block" in code_style or "display:block" in code_style
+            or "monospace" in code_style)
+
+
+def _strip_common_indent(text: str) -> str:
+    """去掉所有非空行共有的最小前导缩进 (统一缩进), 保留相对缩进。
+    用于清理 mdnice 代码块常见的整块前导缩进。
+    微信用 &nbsp; (\xa0) 做缩进, 归一化为普通空格后再算缩进。"""
+    # \xa0 (不间断空格, 来自微信 &nbsp;) 视为普通空格
+    text = text.replace("\xa0", " ")
+    lines = text.split("\n")
+    indents = [len(l) - len(l.lstrip(" \t")) for l in lines if l.strip()]
+    if not indents:
+        return text
+    common = min(indents)
+    if common == 0:
+        return text
+    return "\n".join(l[common:] if len(l) >= common else l for l in lines)
+
+
+def _code_lang_callback(el):
+    """markdownify 回调: el 是 <pre>, 读 data-lang 或子 <code> 的 language-* class。"""
+    lang = el.get("data-lang", "") or ""
+    if not lang:
+        code = el.find("code")
+        if code is not None:
+            for c in str(code.get("class", "") or "").split():
+                if c.startswith("language-"):
+                    lang = c[len("language-"):]
+    return lang
+
+
+def _is_pay_placeholder(content: str) -> str:
+    """判断 content_noencode 是否为付费占位符 (空或含 mp-pay-preview-filter)。"""
+    if not content:
+        return True
+    text = re.sub(r"[\s ]+", "", content)
+    if not text:
+        return True
+    return "mp-pay-preview-filter" in content
+
+
+def _render_content_type_0(cgi_data: dict) -> str:
+    """普通图文 (item_show_type=0): content_noencode 是完整 HTML 片段。
+    data-src→src, 删 height, 归一化代码块。不预代理图片 (交 clean_to_markdown)。"""
+    content = cgi_data.get("content_noencode", "") or ""
+    soup = BeautifulSoup(content, "lxml")
+
+    # 空正文 fallback: 用 title 占位 (对齐 exporter renderContent_0)
+    if not soup.get_text(strip=True):
+        title = (cgi_data.get("title", "") or "").replace("\n", "<br />")
+        return f'<section class="item_show_type_0"><p>{title}</p></section>'
+
+    for img in soup.find_all("img", attrs={"data-src": True}):
+        img["src"] = img["data-src"]
+        del img["data-src"]
+    for img in soup.find_all("img", height=True):
+        del img["height"]
+
+    _normalize_code_snippets(soup)
+
+    body = soup.body
+    return body.decode_contents() if body else str(soup)
+
+
+def _render_content_type_8(cgi_data: dict) -> str:
+    """图片分享 (item_show_type=8): 文本 + picture_page_info_list 图片列表。"""
+    text = (cgi_data.get("content_noencode", "") or "").replace("\n", "<br />")
+    pictures = cgi_data.get("picture_page_info_list", []) or []
+
+    img_html = "".join(
+        f'<div class="picture_item" id="图{i+1}">'
+        f'<img src="{p.get("cdn_url", "")}" alt="图{i+1}" />'
+        f'<p>图{i+1}</p></div>'
+        for i, p in enumerate(pictures) if isinstance(p, dict)
+    )
+    return f'<section class="item_show_type_8"><p>{text}</p><div>{img_html}</div></section>'
+
+
+def _render_content_type_10(cgi_data: dict) -> str:
+    """文本分享 (item_show_type=10): text_page_info.content_noencode (fallback content)。"""
+    info = cgi_data.get("text_page_info", {}) or {}
+    text = info.get("content_noencode") or info.get("content") or ""
+    text = text.replace("\n", "<br />")
+    return f'<section class="item_show_type_10"><p>{text}</p></section>'
+
+
+def _render_pay_preview(cgi_data: dict) -> str:
+    """付费文章 (is_pay_subscribe=1): 渲染付费预览信息。"""
+    info = cgi_data.get("pay_subscribe_info", {}) or {}
+    fee = _to_int(info.get("fee", 0))
+    price = f"{fee / 100}元" if fee else "付费"
+    desc = (info.get("desc", "") or "").replace("\n", "<br />")
+    return (
+        '<section class="pay-notice">'
+        f'<div class="badge">付费内容 · {price}</div>'
+        f'<div class="desc">{desc}</div>'
+        '<div class="hint">本文为付费文章，完整内容需购买后查看</div>'
+        '</section>'
+    )
 
 
 # ============================================================

@@ -9,6 +9,8 @@ frontend/out/
 frontend/node_modules/
 backend/app/**/__pycache__/
 backend/**/*.pyc
+backend/.venv/
+.venv/
 
 # OS
 .DS_Store
@@ -18,6 +20,8 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+.claude/
+openspec/
 
 # Logs
 *.log

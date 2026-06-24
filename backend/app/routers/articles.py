@@ -30,6 +30,20 @@ PROACTIVE_DISTANCE_THRESHOLD = 0.45  # bge-small-zh cosine distance (<=>); lower
 PROACTIVE_PUBLIC_BASE = os.getenv("TROVE_PUBLIC_BASE", "http://localhost")
 
 
+def _published_at_from_og(content_data: dict):
+    """og_meta.published_time (str) → timezone-aware datetime, or None.
+    各平台 fetch 都把发布时间放进 og_meta.published_time; 微信 cgiDataNew 路径已填好
+    '2026-06-11 11:29' 这类可读字符串。"""
+    pt = (content_data.get('og_meta') or {}).get('published_time')
+    if not pt:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(pt).replace('Z', '+00:00'))
+    except (ValueError, TypeError):
+        return None
+
+
 async def _maybe_push_proactive_relation(db, article_id):
     """If the just-added article has a strongly-related sibling in the same
     user's library, push a brief WeChat message: 「你刚存的《X》跟之前的《Y》
@@ -240,6 +254,9 @@ async def create_article(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to fetch URL: {str(e)}")
 
+    # og_meta.published_time → published_at (各平台统一; 微信 cgiDataNew 路径已填好)
+    published_at = _published_at_from_og(content_data)
+
     # Create article
     article = Article(
         url=clean_url,
@@ -248,6 +265,7 @@ async def create_article(
         source_platform=content_data['platform'],
         author=content_data['author'],
         cover_image=content_data['cover_image'],
+        published_at=published_at,
         folder_id=data.folder_id,
         user_id=current_user.id,
     )
@@ -301,6 +319,7 @@ async def batch_create_articles(
             source_platform=content_data['platform'],
             author=content_data['author'],
             cover_image=content_data['cover_image'],
+            published_at=_published_at_from_og(content_data),
             user_id=current_user.id,
         )
         db.add(article)
