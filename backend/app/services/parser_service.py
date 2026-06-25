@@ -85,6 +85,8 @@ class ParserService:
         'xhslink.com': 'xhs',          # 小红书短链
         'youtube.com': 'youtube',      # YouTube
         'youtu.be': 'youtube',         # YouTube 短链
+        'feishu.cn': 'feishu',         # 飞书文档 (docx/wiki)
+        'larksuite.com': 'feishu',     # Lark (飞书国际版)
     }
 
     def detect_platform(self, url: str) -> str:
@@ -183,6 +185,10 @@ class ParserService:
         # P1: 微信公众号 - cgiDataNew 结构化解析, 未命中则 fallback 到通用路径
         if platform == 'wechat':
             return await self._fetch_wechat(url)
+
+        # P6: 飞书文档 - lark-cli 官方 API 取 Markdown + 画板恢复, 失败回退通用路径
+        if platform == 'feishu':
+            return await self._fetch_feishu(url)
 
         # P5: 通用网页 - trafilatura 优先,内容过短再 Playwright 渲染,最后 BeautifulSoup 兜底
         # 视频号(channels.weixin.qq.com)、CSDN、掘金、Medium、少数派、36氪 等 JS 动态页同走此路
@@ -414,7 +420,186 @@ class ParserService:
                 if self._text_len(alt["raw_content"]) > self._text_len(result["raw_content"]):
                     result = alt
 
+        # 注: 图表重绘不在抓取路径做 (多图 vision 调用会阻塞添加文章请求)。
+        # 改由 process_article_background 在 clean_content 提交后异步执行。
+
         return result
+
+    async def redraw_diagrams_in_markdown(self, markdown: str) -> str:
+        """对 markdown 正文里的图片做图表识别+重绘 (异步后台调用, 非抓取路径)。
+
+        图表类 → 在原图后插入重绘图表 (保留原图兜底); 照片/未配置视觉模型 → 原样。
+        单篇图片数量上限避免过度 token 成本; 任一环节失败均保留原图。
+        操作 markdown 而非 HTML: 后台存的 clean_content 已是 markdown。
+        """
+        if not markdown or "![" not in markdown:
+            return markdown
+        from app.services.ai_service import llm_service
+        from app.services.diagram_service import render_diagram
+
+        limit = _get_plugin_int("wechat_redraw_max_images", 6)
+        # markdown 图片: ![alt](url)
+        matches = list(re.finditer(r'!\[[^\]]*\]\(([^)]+)\)', markdown))
+        processed = 0
+        # 从后往前替换, 避免插入改变前面 match 的偏移
+        inserts = []  # (end_pos, text_to_insert)
+        for m in matches:
+            if processed >= limit:
+                logger.info(f"wechat redraw: hit image cap ({limit}), skipping rest")
+                break
+            src = m.group(1).strip()
+            if not src or src.startswith("data:"):
+                continue
+            processed += 1
+            try:
+                vision_url = self._proxy_to_absolute(src)
+                spec = await llm_service.classify_and_extract_diagram(vision_url)
+                if not spec:
+                    continue
+                data_uri = await render_diagram(spec)
+                if not data_uri:
+                    continue
+                inserts.append((m.end(), f"\n\n![重绘图表]({data_uri})"))
+            except Exception as e:
+                logger.warning(f"wechat redraw failed for one image (kept original): {e}")
+                continue
+
+        if not inserts:
+            return markdown
+        # 倒序插入
+        for end_pos, text in sorted(inserts, key=lambda x: x[0], reverse=True):
+            markdown = markdown[:end_pos] + text + markdown[end_pos:]
+        logger.info(f"wechat redraw: inserted {len(inserts)} redrawn diagram(s)")
+        return markdown
+
+    @staticmethod
+    def _proxy_to_absolute(src: str) -> str:
+        """视觉模型取图需要绝对 URL。已是 proxy 相对路径的还原回原始 CDN URL。"""
+        if src.startswith("/api/images/proxy"):
+            from urllib.parse import urlparse, parse_qs, unquote
+            q = parse_qs(urlparse(src).query)
+            return unquote(q.get("url", [src])[0])
+        return src
+
+    async def _fetch_feishu(self, url: str) -> Dict:
+        """飞书 docx/wiki 文档抓取: lark-cli 官方 API 取 Markdown + 画板恢复。
+
+        失败 (lark-cli 缺失/未授权/非 docx 类型/报错) 优雅回退 _fetch_generic,
+        行为与微信 fallback 一致 — 绝不崩溃, 至少产出可用结果 (尽管丢画板)。
+        """
+        from app.services.lark_cli import run_lark, LarkCliError
+
+        try:
+            # docs +fetch 直接接受 docx/wiki URL, 无需单独 wiki +node-get。
+            # 非 docx 类型 (sheet/base/slides) 会报错 → 落入 except 回退。
+            res = await run_lark([
+                "docs", "+fetch", "--api-version", "v2", "--as", "user",
+                "--doc", url, "--doc-format", "markdown",
+            ], timeout=90)
+            content = (((res or {}).get("data") or {}).get("document") or {}).get("content") or ""
+            if not content.strip():
+                raise LarkCliError("empty document content")
+        except LarkCliError as e:
+            logger.info(f"feishu fetch failed ({e}), falling back to generic for {url}")
+            return await self._fetch_generic(url, "feishu")
+
+        # 画板恢复: <whiteboard token=.../> → 结构化重绘, 失败回退图片。
+        content = await self._restore_feishu_whiteboards(content)
+
+        # 内嵌图片与跨文档引用 (cite→链接, 不递归)
+        content = _clean_feishu_tags(content)
+
+        # 标题: Markdown 首个 <title> 或 # 一级标题
+        title = ""
+        m = re.search(r'<title>(.*?)</title>', content)
+        if m:
+            title = m.group(1).strip()
+        if not title:
+            m = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+            title = m.group(1).strip() if m else "飞书文档"
+
+        return {
+            "title": title,
+            "raw_html": "",          # 空 raw_html → 下游按 "已是 markdown" 处理, 不走 clean_to_markdown
+            "raw_content": content,
+            "platform": "feishu",
+            "author": "",
+            "cover_image": None,
+            "og_meta": {"title": title, "site_name": "飞书文档"},
+        }
+
+    async def _restore_feishu_whiteboards(self, content: str) -> str:
+        """把 Markdown 中的 <whiteboard token=.../> 替换为重绘图表 (失败回退画板图片)。"""
+        from app.services.lark_cli import run_lark, LarkCliError
+        from app.services.diagram_service import render_diagram
+
+        tokens = _WHITEBOARD_TAG_RE.findall(content)
+        if not tokens:
+            return content
+
+        for token in tokens:
+            replacement = None
+            text_outline = ""
+            try:
+                raw = await run_lark([
+                    "whiteboard", "+query", "--as", "user",
+                    "--whiteboard-token", token, "--output_as", "raw",
+                ], timeout=90)
+                nodes = ((raw or {}).get("data") or {}).get("nodes") or []
+                spec = _whiteboard_nodes_to_spec(nodes)
+                if spec:
+                    text_outline = _whiteboard_text_outline(spec)
+                    data_uri = await render_diagram(spec)
+                    if data_uri:
+                        # 重绘成功: 图表 + 提取文本 (保证可检索)
+                        replacement = f"![白板图表]({data_uri})"
+                        if text_outline:
+                            replacement += f"\n\n{text_outline}"
+            except LarkCliError as e:
+                logger.info(f"feishu whiteboard {token} query failed: {e}")
+
+            # 回退: media-download 导出画板图片 (受控临时目录内下载后转 data URI)
+            if replacement is None:
+                replacement = await self._feishu_whiteboard_image(token)
+                if replacement and text_outline:
+                    replacement += f"\n\n{text_outline}"
+
+            # 最终兜底: 连图片都失败, 至少保留文本列表 (绝不丢内容)
+            if replacement is None:
+                replacement = text_outline or f"<!-- whiteboard {token} 无法恢复 -->"
+
+            # 替换标签 (兼容有/无自闭合斜杠两种形态)
+            content = content.replace(f'<whiteboard token="{token}"/>', replacement, 1)
+            content = content.replace(f'<whiteboard token="{token}">', replacement, 1)
+
+        return content
+
+    async def _feishu_whiteboard_image(self, token: str) -> Optional[str]:
+        """media-download 导出画板图片为 base64 data URI。失败返回 None。
+        media-download 仅接受相对路径, 故在受控临时目录内下载后读出。"""
+        from app.services.lark_cli import run_lark, LarkCliError
+        import base64
+
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                # 受控 cwd = tmp, 输出相对目录 (media-download 拒绝绝对路径)
+                await run_lark([
+                    "docs", "+media-download", "--as", "user",
+                    "--type", "whiteboard", "--token", token,
+                    "--output", "wb",
+                ], timeout=90, cwd=tmp, parse_json=False)
+            except LarkCliError as e:
+                logger.info(f"feishu whiteboard {token} image download failed: {e}")
+                return None
+            # 找下载到的图片文件
+            files = list(Path(tmp).rglob("*"))
+            imgs = [f for f in files if f.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+            if not imgs:
+                return None
+            data = imgs[0].read_bytes()
+            mime = "image/png" if imgs[0].suffix.lower() == ".png" else "image/jpeg"
+            b64 = base64.b64encode(data).decode()
+            return f"![白板]({f'data:{mime};base64,{b64}'})"
 
     async def _fetch_generic(self, url: str, platform: str) -> Dict:
         """通用网页抓取 + 提取级联。
@@ -2177,6 +2362,88 @@ def _render_pay_preview(cgi_data: dict) -> str:
         '<div class="hint">本文为付费文章，完整内容需购买后查看</div>'
         '</section>'
     )
+
+
+# ============================================================
+#  Feishu (飞书) 文档 helpers
+# ============================================================
+#  飞书 docx/wiki 链接经 lark-cli 官方 API 取干净 Markdown, 画板经
+#  whiteboard +query --output_as raw 取结构化节点喂给图表重绘引擎。
+#  whiteboard raw 形状 (spike 实证):
+#    data.nodes[] 每个 {id, type, x, y, text?, connector?}
+#    text_shape: node['text']['text'] = 标签文本
+#    connector:  node['connector']['start'/'end']['attached_object']['id'] = 端点 node id
+
+_WHITEBOARD_TAG_RE = re.compile(r'<whiteboard\s+token="([^"]+)"\s*/?>')
+
+
+def _whiteboard_nodes_to_spec(nodes: list) -> Optional[dict]:
+    """把 whiteboard raw nodes 映射为图表引擎的 {nodes, arrows} spec。
+    text_shape → node(label), connector → arrow(source→target)。无文本则 None。"""
+    spec_nodes = []
+    id_set = set()
+    for n in nodes:
+        if n.get("type") != "text_shape":
+            continue
+        label = ((n.get("text") or {}).get("text") or "").strip()
+        if not label:
+            continue
+        nid = n.get("id")
+        id_set.add(nid)
+        spec_nodes.append({
+            "id": nid,
+            "label": label,
+            # 透传画板坐标, 渲染器可据此布局 (缺失则渲染器自动排布)
+            "x": n.get("x"), "y": n.get("y"),
+        })
+    if not spec_nodes:
+        return None
+
+    spec_arrows = []
+    for n in nodes:
+        if n.get("type") != "connector":
+            continue
+        conn = n.get("connector") or {}
+        src = ((conn.get("start") or {}).get("attached_object") or {}).get("id")
+        tgt = ((conn.get("end") or {}).get("attached_object") or {}).get("id")
+        # 只保留两端都是已知文本节点的连线
+        if src in id_set and tgt in id_set:
+            spec_arrows.append({"source": src, "target": tgt})
+
+    return {"nodes": spec_nodes, "arrows": spec_arrows,
+            "template_type": "mind-map", "style": 1}
+
+
+def _whiteboard_text_outline(spec: dict) -> str:
+    """画板文本兜底: 重绘失败时附上提取的文本列表, 保证内容可检索。"""
+    labels = [n["label"] for n in spec.get("nodes", []) if n.get("label")]
+    if not labels:
+        return ""
+    return "\n".join(f"- {l}" for l in labels)
+
+
+# 飞书 Markdown 里带 url 的内嵌图片标签 → 标准 markdown 图片
+_FEISHU_IMG_RE = re.compile(r'<img\b[^>]*\burl="([^"]+)"[^>]*/?>')
+# 跨文档引用 <cite ... title="..." url="..."> → 普通链接 (v1 不递归导入)
+_FEISHU_CITE_RE = re.compile(r'<cite\b([^>]*)/?>')
+
+
+def _clean_feishu_tags(content: str) -> str:
+    """把飞书 Markdown 残留的 <img url=.../> 转成 markdown 图片,
+    <cite .../> 转成普通链接 (不递归导入)。无 url/title 的标签原样保留。"""
+    def img_sub(m):
+        return f'![]({m.group(1)})'
+    content = _FEISHU_IMG_RE.sub(img_sub, content)
+
+    def cite_sub(m):
+        attrs = m.group(1)
+        title = re.search(r'title="([^"]*)"', attrs)
+        url = re.search(r'url="([^"]*)"', attrs)
+        label = (title.group(1) if title else "") or "引用"
+        if url:
+            return f'[{label}]({url.group(1)})'
+        return label  # 无 url: 仅留标题文本, 不递归
+    return _FEISHU_CITE_RE.sub(cite_sub, content)
 
 
 # ============================================================

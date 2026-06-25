@@ -4,7 +4,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import dynamic from 'next/dynamic';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeHighlight from 'rehype-highlight';
 
@@ -1148,6 +1148,11 @@ export default function ReaderPage({ params }: { params: { id: string } }) {
               <ReactMarkdown
                 remarkPlugins={[remarkGfm]}
                 rehypePlugins={[rehypeHighlight]}
+                // react-markdown v9 默认 urlTransform 会剥掉 data: URI，导致重绘图表
+                // (data:image/png;base64,...) 只显示 alt 文字不显示图。放行 data:image。
+                urlTransform={(url) =>
+                  url.startsWith('data:image/') ? url : defaultUrlTransform(url)
+                }
               >
                 {(article.clean_content || article.raw_content)!}
               </ReactMarkdown>

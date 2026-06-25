@@ -460,10 +460,16 @@ class LLMService:
 可用文章：
 {articles_text}
 
-请按学习先后顺序排列文章ID，并生成学习路线描述。返回JSON：
+要求：
+1. 按学习先后顺序排列文章ID
+2. 生成一段路线描述，用自然、易读的中文说明：适合谁学、学完能达到什么目标、学习重点是什么
+3. 描述中不要出现 Markdown 标题符号（如 #、##），可以用短句、项目符号或数字序号组织
+4. 描述总长度控制在 200 字以内
+
+返回JSON：
 {{
     "title": "学习路线标题",
-    "description": "路线描述",
+    "description": "路线描述（纯文本或简单列表，不要 Markdown 标题）",
     "ordered_articles": ["文章ID1", "文章ID2", ...]
 }}
 只返回JSON。"""
@@ -521,6 +527,86 @@ class LLMService:
         
         # Fallback to local model
         return generate_local_embedding(text)
+
+    async def _vision_chat(self, prompt: str, image_url: str, temperature: float = 0.2) -> Optional[str]:
+        """Multimodal chat: send a prompt + image to the configured vision model.
+
+        Vision is opt-in via the `vision_model` plugins setting — empty means no
+        vision model is configured (the default code-only model rejects images),
+        so callers MUST treat None as "skip redraw, keep original image".
+        """
+        from app.config_manager import get_llm_config, get_plugins_config
+        vision_model = (get_plugins_config().get("vision_model") or "").strip()
+        if not vision_model:
+            return None  # feature dormant until a vision model is configured
+
+        cfg = get_llm_config()
+        api_base = cfg.get("api_base", "").rstrip("/")
+        api_key = cfg.get("api_key", "")
+        url = f"{api_base}/chat/completions"
+        payload = {
+            "model": vision_model,
+            "temperature": temperature,
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]}],
+        }
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                resp = await client.post(url, headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                }, json=payload)
+            if resp.status_code != 200:
+                logger.warning(f"vision chat {resp.status_code}: {resp.text[:200]}")
+                return None
+            data = resp.json()
+            choices = data.get("choices") or []
+            if choices:
+                return (choices[0].get("message") or {}).get("content") or None
+        except Exception as e:
+            logger.warning(f"vision chat failed: {e}")
+        return None
+
+    async def classify_and_extract_diagram(self, image_url: str) -> Optional[Dict[str, Any]]:
+        """Classify an article image and, if it's a diagram, extract a redraw spec.
+
+        Returns None when: no vision model configured, the image is a photo/
+        screenshot (not a diagram), or extraction fails — caller keeps original.
+        On success returns a fully-laid-out spec {nodes, arrows, style,
+        template_type, canvas} for the engine — the LLM places coordinates and
+        sizes nodes itself, per the fireworks skill's layout rules.
+        """
+        prompt = (
+            "你是技术图表识别与布局专家。先判断这张图片是否为架构图/流程图/思维导图"
+            "等结构化图表（而非照片、截图、装饰图、代码截图）。不是则只返回 "
+            "{\"is_diagram\": false}。\n\n"
+            "如果是结构化图表，提取其结构并**自己完成布局**，返回严格 JSON（不要 markdown 代码块）。"
+            "你必须为每个节点计算坐标和尺寸，遵守以下规则：\n"
+            "1. 画布：默认 960×700 容不下时放大画布（宁可放大画布也别挤），用 \"canvas\": {\"width\":960,\"height\":700} 指定。\n"
+            "2. 节点尺寸：每个节点必须带 x,y,width,height。宽度按文字算：中文每字约 22px（18px 字体），"
+            "长标签用 label(标题,一行) + sublabel(补充说明,一行小字) 拆分，切勿把多行塞进一个 label。\n"
+            "3. label 最多一行、不超过约 12 个字；超出的内容放 sublabel。\n"
+            "4. 间距：同层节点水平间距 ≥80px，层间距 ≥120px，画布边距 ≥40px，节点间留 ≥60px。\n"
+            "5. 坐标对齐 8 的倍数。节点不要重叠、不要压住其它节点或标题。\n"
+            "返回格式：\n"
+            '{"is_diagram": true, "template_type": "flowchart|architecture|mind-map", '
+            '"style": 1, "title": "图表标题", "canvas": {"width": 960, "height": 700}, '
+            '"nodes": [{"id": "n1", "label": "用户提问", "sublabel": "补充说明", '
+            '"x": 56, "y": 40, "width": 200, "height": 80}], '
+            '"arrows": [{"source": "n1", "target": "n2"}]}'
+        )
+        result = await self._vision_chat(prompt, image_url)
+        if not result:
+            return None
+        parsed = _parse_llm_json(result)
+        if not parsed or not parsed.get("is_diagram"):
+            return None
+        if not parsed.get("nodes"):
+            return None
+        return parsed
 
     async def generate_mindmap(self, content: str, title: str) -> Dict[str, Any]:
         """Generate a hierarchical mind map from article content.

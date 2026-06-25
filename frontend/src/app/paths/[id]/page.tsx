@@ -128,7 +128,7 @@ export default function PathDetailPage() {
                   {article.title}
                 </h3>
                 {article.summary && (
-                  <p className="text-xs text-[#6e6e73] line-clamp-2">{article.summary}</p>
+                  <p className="text-xs text-[#6e6e73] line-clamp-2 whitespace-pre-line">{article.summary}</p>
                 )}
                 <div className="flex items-center gap-3 mt-2 text-[11px] text-[#aeaeb2]">
                   {article.source_platform && (

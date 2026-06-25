@@ -220,11 +220,66 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
             except Exception as e:
                 logger.warning(f"proactive relation push failed for {article_id}: {e}")
 
+            # Diagram redraw LAST: article is already fully usable (text + original
+            # images committed above). Redraw is slow (one vision + render call per
+            # image) so it runs here, not in the fetch path — otherwise a图多 article
+            # hangs the add request. Failures keep the original images.
+            #
+            # Uses its OWN fresh session: redraw runs after several commits, and if any
+            # upstream commit (embedding/graph) errored, this session would be in a
+            # PendingRollback state and redraw's commit would silently fail — the work
+            # (minutes of vision+render) wasted with nothing saved.
+            if article.source_platform in ("wechat", "feishu"):
+                try:
+                    await _redraw_article_diagrams(article_id)
+                except Exception as e:
+                    logger.warning(f"Diagram redraw failed for {article_id} (kept originals): {e}")
+
         except Exception as e:
             import traceback
             logger.error(f"Background processing FATAL for {article_id}: {e}")
             logger.error(traceback.format_exc())
             await db.rollback()
+
+
+async def _redraw_article_diagrams(article_id: UUID):
+    """Async diagram redraw in an isolated session.
+
+    Re-reads clean_content, redraws diagram images, writes back. Own session so a
+    poisoned upstream session can't silently swallow the commit. Idempotent: skips
+    if already redrawn (re-runnable without duplicating diagrams).
+    """
+    import logging
+    logger = logging.getLogger("trove.background")
+    from app.database import async_session
+
+    async with async_session() as db:
+        article = await db.get(Article, article_id)
+        if not article or not article.clean_content:
+            return
+        if "![重绘图表]" in article.clean_content:
+            return  # already redrawn
+        redrawn = await parser_service.redraw_diagrams_in_markdown(article.clean_content)
+        if redrawn != article.clean_content:
+            article.clean_content = redrawn
+            await db.commit()
+            logger.info(f"Diagram redraw updated clean_content for {article_id}")
+
+
+@router.post("/{article_id}/redraw-diagrams", status_code=202)
+async def redraw_article_diagrams(
+    article_id: UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Manually (re)trigger diagram redraw for an article (e.g. after configuring
+    a vision model, or for articles imported before redraw existed)."""
+    article = await db.get(Article, article_id)
+    if not article or article.user_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Article not found")
+    background_tasks.add_task(_redraw_article_diagrams, article_id)
+    return {"status": "redraw queued"}
 
 
 @router.post("", response_model=ArticleResponse, status_code=201)
