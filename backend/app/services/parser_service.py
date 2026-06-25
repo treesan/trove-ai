@@ -434,6 +434,8 @@ class ParserService:
         """
         if not markdown or "![" not in markdown:
             return markdown
+        if not _get_plugin_bool("enable_diagram_redraw", False):
+            return markdown  # 图表重绘默认关闭: 保留原图, 不插入重绘 SVG
         from app.services.ai_service import llm_service
         from app.services.diagram_service import render_diagram
 
@@ -549,7 +551,8 @@ class ParserService:
                 spec = _whiteboard_nodes_to_spec(nodes)
                 if spec:
                     text_outline = _whiteboard_text_outline(spec)
-                    data_uri = await render_diagram(spec)
+                    # 图表重绘默认关闭: 关闭时跳过 SVG 渲染, 回退画板导出图 (原图)
+                    data_uri = await render_diagram(spec) if _get_plugin_bool("enable_diagram_redraw", False) else None
                     if data_uri:
                         # 重绘成功: 图表 + 提取文本 (保证可检索)
                         replacement = f"![白板图表]({data_uri})"

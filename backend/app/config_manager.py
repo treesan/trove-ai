@@ -168,6 +168,18 @@ CONFIG_SCHEMA: Dict[str, dict] = {
                 "required": False,
             },
             {
+                "key": "enable_diagram_redraw",
+                "label": "图表重绘为 SVG",
+                "type": "select",
+                "options": [
+                    {"value": "true", "label": "开启"},
+                    {"value": "false", "label": "关闭"},
+                ],
+                "default": "false",
+                "placeholder": "关闭=只显示原图；开启=飞书画板/微信图表重绘为 SVG",
+                "required": False,
+            },
+            {
                 "key": "vision_model",
                 "label": "视觉模型（图表重绘）",
                 "type": "text",

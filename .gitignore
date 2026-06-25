@@ -1,6 +1,7 @@
 # Secrets — never commit
 .env
 backend/app/config_store.json
+*/config_store.json
 *.pem
 
 # Build artifacts
