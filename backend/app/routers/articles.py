@@ -152,6 +152,7 @@ async def process_article_background(article_id: UUID, raw_content: str, raw_htm
                 clean_md = raw_content
             else:
                 clean_md = parser_service.clean_to_markdown(raw_content, platform)
+                clean_md = parser_service.strip_ad_images(clean_md, platform)
             plain_text = clean_md  # For search purposes
             
             article.clean_content = clean_md
@@ -1029,9 +1030,10 @@ async def reprocess_article(
         clean_md = article.raw_content  # Already markdown, don't re-process
     else:
         clean_md = parser_service.clean_to_markdown(article.raw_content, platform)
+        clean_md = parser_service.strip_ad_images(clean_md, platform)
     article.clean_content = clean_md
     article.plain_text = clean_md
-    
+
     # Re-parse — pass raw_content as raw_html fallback for thin content
     ai_result = await llm_service.parse_article(clean_md, article.url, article.raw_content or "")
     
