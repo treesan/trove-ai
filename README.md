@@ -352,62 +352,29 @@ The plugin auto-detects already-synced articles via dual-OR (sync_state.json ∪
 
 ---
 
-## Simon Fork 变更 (v1.1)
+## What's new in this fork
 
-本仓库 ([treesan/trove-ai](https://github.com/treesan/trove-ai)) fork 自 [simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)（后者又 fork 自 [weaiw/trove-ai](https://github.com/weaiw/trove-ai)）。在上游基础上叠加以下能力：
+This repo ([treesan/trove-ai](https://github.com/treesan/trove-ai)) is forked from [simonlin000/trove-ai](https://github.com/simonlin000/trove-ai) (itself a fork of [weaiw/trove-ai](https://github.com/weaiw/trove-ai)). On top of the upstream base it adds:
 
-### 📄 飞书文档导入
+### 📄 Feishu doc import
 
-识别 `feishu.cn` / `larksuite.com` 链接，经 `lark-cli` 调用官方 API 取 docx/wiki → 干净 Markdown 直出（标题/列表/callout/引用保真）。**画板（白板）内容不再丢失**：`whiteboard +query --output_as raw` 取结构化节点 + 连线 → 喂给图表重绘引擎重新渲染为清晰 SVG；重绘失败回退为画板导出图片，文本始终保留作可检索兜底。任一环节失败优雅回退到通用抓取路径，绝不崩溃。
+Recognizes `feishu.cn` / `larksuite.com` links and pulls docx/wiki through `lark-cli` (official API → clean Markdown, preserving titles / lists / callouts / quotes). **Whiteboards are no longer lost**: `whiteboard +query --output_as raw` fetches structured nodes + connectors → fed to the diagram-redraw engine and re-rendered as a crisp SVG; on render failure it falls back to the exported whiteboard image, and the extracted text is always kept as a searchable fallback. Any stage failing degrades gracefully to the generic crawl path — never crashes.
 
-### 📊 d2 图表重绘引擎
+### 📊 d2 diagram-redraw engine
 
-微信公众号文章里的架构图/流程图/思维导图多为扁平位图——模糊、不可检索。**视觉模型识别图表类图片 → 提取拓扑 → d2（dagre 布局引擎）自动算坐标渲染 SVG → 内嵌回正文**。LLM 只描述 `a -> b -> c` 拓扑，不再死磕坐标（旧 fireworks 引擎要 LLM 喂每个节点 x/y/width/height，反复出布局 bug）。照片类保留原样；失败保留原图。重绘在后台异步执行（独立 db session），文章秒进、图表稍后升级。受单一总开关 `enable_diagram_redraw` 门控，默认关闭。
+Architecture / flowchart / mind-map images in WeChat articles are usually flat bitmaps — blurry and unsearchable. **A vision model classifies chart images → extracts topology → d2 (dagre layout engine) computes coordinates and renders an SVG → embedded back into the article.** The LLM only describes `a -> b -> c` topology instead of fighting with coordinates (the old fireworks engine required the LLM to feed every node's x/y/width/height, repeatedly producing layout bugs). Photos are left untouched; on failure the original image is kept. Redraw runs async in the background (isolated db session) — the article lands in seconds, diagrams upgrade moments later. Gated by a single master switch `enable_diagram_redraw`, off by default.
 
-> 设计与实现全过程以 OpenSpec 管理：见 `openspec/`（飞书导入 `feishu-doc-import`、图表重绘 `diagram-regeneration`，已归档 change 含设计文档与决策记录）。
+> The whole design + implementation is managed with OpenSpec — see `openspec/` (Feishu import `feishu-doc-import`, diagram redraw `diagram-regeneration`; archived changes include design docs and decision records).
 
-### 上游继承（Simon fork）
+### Fork-specific setup
 
-- 🎬 **视频 ASR 语音转录** — B 站 & YouTube → 完整文字稿（字幕抓取 / Whisper ASR / 30 分钟上限防 OOM）
-- 📺 **YouTube 完整支持** — yt-dlp 拉取元数据 + 中文字幕优先 + ASR 兜底
-- 🧠 **DeepSeek V4-Pro 驱动** — 1.6 万亿参数 MoE，摘要提炼核心命题而非表面总结
-- ⚙️ **UI 配置化** — 设置 → 插件设置，开关即时生效不重启
-- 🔄 **Obsidian 双向同步** — 新增 `POST /api/sync/articles` 推回端点
+After the standard Quick Start above, enable the diagram engine: **Settings → 插件设置** → turn on `enable_diagram_redraw` and fill `vision_model` (e.g. Volcengine Ark `doubao-seed-2.0-pro`). Redraw only fires for WeChat/Feishu articles and only when a vision model is configured.
 
-### 从本仓库部署
-
-```bash
-git clone https://github.com/treesan/trove-ai.git
-cd trove-ai
-cp .env.example .env
-# 编辑 .env，至少填 SECRET_KEY 和 POSTGRES_PASSWORD
-docker compose up -d
-```
-
-打开 http://localhost → 设置 → AI 对话模型 配 LLM → 设置 → 插件设置 开 `enable_diagram_redraw`（并填 `vision_model`，如火山方舟 `doubao-seed-2.0-pro`）→ 开始用。
-
-> 飞书导入需要容器内可用 `lark-cli`（Node）且已 `auth login` 授权。当前镜像未内置 lark-cli，飞书导入在容器内会优雅回退通用抓取——本地跑或后续镜像内置后完整生效。详见路线图。
+> Feishu import needs `lark-cli` (Node) available inside the container and already `auth login`-authorized. The current image does not bundle lark-cli, so in-container Feishu import degrades gracefully to generic crawling — run locally, or wait for the image to bundle it (see Roadmap).
 
 ---
 
 ## Roadmap
-
-### v1.2 — current (this fork)
-- ✅ Feishu/Lark doc import (docx/wiki → Markdown, whiteboard recovery via lark-cli)
-- ✅ d2 diagram-redraw engine (vision model → topology → d2 lays out → SVG); replaces fireworks + hand-layout
-- ✅ `enable_diagram_redraw` master switch + `vision_model` / per-article image cap settings
-- ✅ WeChat Channels (视频号) capture
-- ✅ Smart generic extraction (trafilatura → headless render → BeautifulSoup)
-- ✅ Article-scoped Q&A (📄 this-article / 📚 whole-library toggle)
-
-### v1.1
-- 🔜 **Feishu auth into container** — npm-install `@larksuite/cli` in the image + file-based `app-secret-stdin` (no macOS Keychain) so containerized deploys get full Feishu import without host lark-cli
-- 🔜 **Image import fix** — current article image handling has known issues (hotlink-proxy + base64 data-URI bloat on large articles); add a static-image store + cleanup
-- 🔜 **Info/source import** — import external info sources beyond article URLs
-- 🔜 Browser extension (one-click clip from any tab)
-- 🔜 Pocket / Omnivore import
-- 🔜 Better article deduplication
-- 🔜 PWA support for "add to home screen" on mobile
 
 ### v1.0
 - ✅ Multi-platform capture (8+ sources)
@@ -419,6 +386,23 @@ docker compose up -d
 - ✅ Multi-tenant + revocable sync tokens
 - ✅ Self-host via Docker
 - ✅ Responsive UI for PC / pad / mobile
+
+### v1.1 — current (this fork)
+- ✅ Feishu/Lark doc import (docx/wiki → Markdown, whiteboard recovery via lark-cli)
+- ✅ d2 diagram-redraw engine (vision model → topology → d2 lays out → SVG); replaces fireworks + hand-layout
+- ✅ `enable_diagram_redraw` master switch + `vision_model` / per-article image cap settings
+- ✅ WeChat Channels (视频号) capture
+- ✅ Smart generic extraction (trafilatura → headless render → BeautifulSoup)
+- ✅ Article-scoped Q&A (📄 this-article / 📚 whole-library toggle)
+
+### v1.2
+- 🔜 **Feishu auth into container** — npm-install `@larksuite/cli` in the image + file-based `app-secret-stdin` (no macOS Keychain) so containerized deploys get full Feishu import without host lark-cli
+- 🔜 **Image import fix** — current article image handling has known issues (hotlink-proxy + base64 data-URI bloat on large articles); add a static-image store + cleanup
+- 🔜 **Info/source import** — import external info sources beyond article URLs
+- 🔜 Browser extension (one-click clip from any tab)
+- 🔜 Pocket / Omnivore import
+- 🔜 Better article deduplication
+- 🔜 PWA support for "add to home screen" on mobile
 
 ### v1.3+
 - More LLM providers (Claude, Gemini, Doubao native)
