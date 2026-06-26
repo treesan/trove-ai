@@ -11,7 +11,7 @@
 [![Responsive: PC · Pad · Mobile](https://img.shields.io/badge/Responsive-PC%20·%20Pad%20·%20Mobile-007aff)]()
 [![Status: active](https://img.shields.io/badge/status-active-success.svg)]()
 
-> 🔥 **这是 Simonlin 优化版** ([simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)) — 在原版 [weaiw/trove-ai](https://github.com/weaiw/trove-ai) 基础上增加了 B 站/YouTube 视频 ASR 语音转录、DeepSeek V4-Pro 驱动、UI 配置化等关键能力。详见下方 [Simon Fork 变更](#simon-fork-变更-v11)。
+> 🔥 **Fork of [simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)** (itself a fork of [weaiw/trove-ai](https://github.com/weaiw/trove-ai)) — adds Feishu doc import + a d2-powered diagram-redraw engine (WeChat/Feishu charts auto-redrawn as SVG) on top of the video ASR + DeepSeek + UI-config base. See [What's new in this fork](#whats-new-in-this-fork).
 
 [中文 README](README.zh.md) · [Self-host guide](docs/SELF_HOST.md) · [Obsidian plugin](https://github.com/weaiw/trove-sync-obsidian)
 
@@ -40,15 +40,15 @@ It's yours to host. It's yours to keep.
 <td width="50%" valign="top">
 
 #### 📥 Multi-platform capture
-WeChat 公众号 · **视频号 (WeChat Channels)** · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金 — and any OpenGraph-aware URL.
-JS-rendered & no-parser pages (视频号, CSDN, Medium, …) are extracted via a *trafilatura → headless-Chromium render → BeautifulSoup* cascade for clean main-content.
+WeChat 公众号 · **视频号 (WeChat Channels)** · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金 · **Feishu/Lark docs (docx/wiki)** — and any OpenGraph-aware URL.
+Feishu links go through `lark-cli` (official API → clean Markdown, whiteboards recovered as structured diagrams); JS-rendered & no-parser pages (视频号, CSDN, Medium, …) via a *trafilatura → headless-Chromium render → BeautifulSoup* cascade.
 Ingestion via: browser bookmark, WeChat Bot, paste, upload (PDF/DOCX/EPUB/etc), one-sentence Spark generation.
 
 </td>
 <td width="50%" valign="top">
 
 #### 🧠 AI does the work, not you
-Every article gets: AI-extracted title, 5-sentence summary, 3-5 key points, auto-tags, source-aware author extraction, 384-dim vector embedding, mind-map auto-generation. **B 站 / YouTube 视频自动字幕 + ASR 语音转录。**
+Every article gets: AI-extracted title, 5-sentence summary, 3-5 key points, auto-tags, source-aware author extraction, local vector embedding (bge-small-zh-v1.5), mind-map auto-generation. **B 站 / YouTube 视频自动字幕 + ASR 语音转录。** **📊 Diagram redraw: architecture/flowchart/mind-map images in WeChat articles (and Feishu whiteboards) auto-redrawn as crisp SVG via a vision model + d2 layout engine — no more pixelated, unsearchable chart screenshots.**
 
 </td>
 </tr>
@@ -182,12 +182,12 @@ That's it. No Python or Node required on the host.
 ### Steps
 
 ```bash
-# 1. Clone (Simon 优化版，含视频 ASR + YouTube + DeepSeek)
-git clone https://github.com/simonlin000/trove-ai.git
+# 1. Clone (含视频 ASR + YouTube + DeepSeek + Feishu 导入 + d2 图表重绘)
+git clone https://github.com/treesan/trove-ai.git
 cd trove-ai
 
-# 或原版
-# git clone https://github.com/weaiw/trove-ai.git
+# 或上游
+# git clone https://github.com/simonlin000/trove-ai.git
 
 # 2. Configure secrets
 cp .env.example .env
@@ -249,7 +249,7 @@ Bring your own reverse proxy (**Caddy / Traefik / Nginx**) for HTTPS, or use Clo
         │  PostgreSQL 16     │ │  Redis 7       │  │ External APIs     │
         │  + pgvector        │ │  (cache)       │  │ LLM + embedding   │
         │  • articles        │ │                │  │ • DeepSeek        │
-        │  • embeddings 1024d│ │                │  │ • 讯飞 / OpenAI   │
+        │  • embeddings 512d │ │                │  │ • 讯飞 / OpenAI   │
         │  • knowledge_edges │ │                │  │ • SiliconFlow     │
         │  • users + tokens  │ │                │  │ • any compatible  │
         └────────────────────┘ └────────────────┘  └───────────────────┘
@@ -263,9 +263,10 @@ Bring your own reverse proxy (**Caddy / Traefik / Nginx**) for HTTPS, or use Clo
 | Backend | **FastAPI** + SQLAlchemy async + pydantic | Async-native, type-safe, auto OpenAPI docs |
 | Database | **PostgreSQL 16** + **pgvector** | One DB for both relational data and vector search |
 | Cache | **Redis 7** | Sessions, queues |
-| Crawler | **Playwright** + **curl_cffi** + httpx | Defeats Chinese anti-bot (TLS fingerprint, XHR intercept, JS VM bypass) |
+| Crawler | **Playwright** + **curl_cffi** + httpx + **lark-cli** | Defeats Chinese anti-bot (TLS fingerprint, XHR intercept, JS VM bypass); lark-cli gives Feishu official-API access |
 | LLM | Any **OpenAI-compatible** | DeepSeek, 讯飞星辰, OpenAI, SiliconFlow, MiniMax, 智谱, ... |
-| Embedding | **fastembed bge-small-en-v1.5** (384-dim) or SiliconFlow bge-m3 (1024-dim) | Cloud quality with local fallback |
+| Embedding | **fastembed bge-small-zh-v1.5** (512-dim local) or SiliconFlow bge-m3 (1024-dim) | Cloud quality with local CPU fallback |
+| Diagram | **d2** (dagre layout) + optional vision model | WeChat/Feishu charts auto-redrawn as SVG; LLM emits topology only, d2 lays it out |
 | Reverse proxy | **Nginx** | Single ingress, fast static serving |
 
 ---
@@ -280,6 +281,7 @@ Everything user-facing is configurable via the web UI:
 |------|-------|
 | LLM provider + key + model | Settings → AI 对话模型 |
 | Embedding provider + key + model | Settings → 嵌入模型 |
+| Diagram redraw on/off · vision model · per-article image cap | Settings → 插件设置 |
 | Cache clearing / rebuilding | Settings → 系统缓存 |
 | Obsidian sync token | Personal Settings → Obsidian 备份 |
 | WeChat Bot binding | Personal Settings → WeChat |
@@ -307,10 +309,11 @@ See `.env.example` for the complete template with comments.
 | Endpoint | Purpose |
 |----------|---------|
 | `POST /api/auth/login` | User login → JWT |
-| `POST /api/articles` | Add article by URL |
+| `POST /api/articles` | Add article by URL (incl. Feishu docx/wiki links) |
 | `POST /api/articles/upload` | Upload file (PDF / Word / EPUB / etc) |
 | `POST /api/articles/notes` | Write a note |
 | `POST /api/articles/spark` | One-sentence → AI-generated article |
+| `POST /api/articles/{id}/redraw-diagrams` | Manually (re)trigger diagram redraw |
 | `POST /api/assistant/ask` | RAG Q&A on your library |
 | `GET /api/knowledge/graph` | Knowledge graph data |
 | `POST /api/learning/paths/generate` | Generate learning path |
@@ -351,68 +354,60 @@ The plugin auto-detects already-synced articles via dual-OR (sync_state.json ∪
 
 ## Simon Fork 变更 (v1.1)
 
-本仓库 ([simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)) 在原版 [weaiw/trove-ai](https://github.com/weaiw/trove-ai) 基础上增加了以下能力：
+本仓库 ([treesan/trove-ai](https://github.com/treesan/trove-ai)) fork 自 [simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)（后者又 fork 自 [weaiw/trove-ai](https://github.com/weaiw/trove-ai)）。在上游基础上叠加以下能力：
 
-### 🎬 视频 ASR 语音转录
+### 📄 飞书文档导入
 
-**B 站 & YouTube 视频 → 完整文字稿。** 三层处理：
+识别 `feishu.cn` / `larksuite.com` 链接，经 `lark-cli` 调用官方 API 取 docx/wiki → 干净 Markdown 直出（标题/列表/callout/引用保真）。**画板（白板）内容不再丢失**：`whiteboard +query --output_as raw` 取结构化节点 + 连线 → 喂给图表重绘引擎重新渲染为清晰 SVG；重绘失败回退为画板导出图片，文本始终保留作可检索兜底。任一环节失败优雅回退到通用抓取路径，绝不崩溃。
 
-1. **字幕抓取** — 有外挂字幕直接扒下来
-2. **ASR 转录** — 没字幕？后台自动下载音频轨道，Whisper (faster-whisper tiny) 转文字
-3. **智能限制** — 默认 30 分钟上限（可在设置页调），防止内存溢出
+### 📊 d2 图表重绘引擎
 
-流程：贴链接 → 秒存文章 → 30 秒内后台扫到标记 → 几分钟后刷新，字幕已在文章底部。
+微信公众号文章里的架构图/流程图/思维导图多为扁平位图——模糊、不可检索。**视觉模型识别图表类图片 → 提取拓扑 → d2（dagre 布局引擎）自动算坐标渲染 SVG → 内嵌回正文**。LLM 只描述 `a -> b -> c` 拓扑，不再死磕坐标（旧 fireworks 引擎要 LLM 喂每个节点 x/y/width/height，反复出布局 bug）。照片类保留原样；失败保留原图。重绘在后台异步执行（独立 db session），文章秒进、图表稍后升级。受单一总开关 `enable_diagram_redraw` 门控，默认关闭。
 
-### 📺 YouTube 完整支持
+> 设计与实现全过程以 OpenSpec 管理：见 `openspec/`（飞书导入 `feishu-doc-import`、图表重绘 `diagram-regeneration`，已归档 change 含设计文档与决策记录）。
 
-接入 yt-dlp：自动获取标题/频道/简介/封面，优先中文字幕，无字幕走 ASR。只需在设置页填代理地址（国内访问 YouTube 需要）。
+### 上游继承（Simon fork）
 
-### 🧠 DeepSeek V4-Pro 驱动
-
-1.6 万亿参数 MoE 模型（490 亿激活），摘要质量显著提升。不是"本文介绍了XXX"的表面总结，而是提炼核心命题。
-
-### ⚙️ UI 配置化
-
-**设置 → 插件设置**，四个开关随时改：
-
-- YouTube 解析（开/关）
-- 代理地址
-- 语音转录 ASR（开/关）
-- 转录视频上限（默认 1800 秒）
-
-改了立刻生效，不用重启容器。
-
-### 🔄 Obsidian 双向同步
-
-除原版 Trove → Obsidian 拉取外，新增 `POST /api/sync/articles` 端点：Obsidian vault 里的 Markdown 文件可推送回 Trove。按 obsidian_path 去重，支持更新。
-
-### 🐛 关键修复
-
-- **Embedding 向量化修复** — `TextEmbedding` 导入缺失、HuggingFace 国内不可达、向量维度不匹配（1024→384）
-- **双 Worker 竞态条件** — `ASR_RUNNING` 锁防重复转录
-- **临时文件堆积导致磁盘满** — 限制 30 分钟 + 及时清理
-- **长视频 OOM** — 内存保护，超过上限不转录
+- 🎬 **视频 ASR 语音转录** — B 站 & YouTube → 完整文字稿（字幕抓取 / Whisper ASR / 30 分钟上限防 OOM）
+- 📺 **YouTube 完整支持** — yt-dlp 拉取元数据 + 中文字幕优先 + ASR 兜底
+- 🧠 **DeepSeek V4-Pro 驱动** — 1.6 万亿参数 MoE，摘要提炼核心命题而非表面总结
+- ⚙️ **UI 配置化** — 设置 → 插件设置，开关即时生效不重启
+- 🔄 **Obsidian 双向同步** — 新增 `POST /api/sync/articles` 推回端点
 
 ### 从本仓库部署
 
 ```bash
-git clone https://github.com/simonlin000/trove-ai.git
+git clone https://github.com/treesan/trove-ai.git
 cd trove-ai
 cp .env.example .env
-# 编辑 .env，至少填 DEEPSEEK_API_KEY 和 SECRET_KEY
+# 编辑 .env，至少填 SECRET_KEY 和 POSTGRES_PASSWORD
 docker compose up -d
 ```
 
-打开 http://localhost:80 → 设置 → AI 对话模型 配 DeepSeek → 设置 → 插件设置 配代理 → 开始用。
+打开 http://localhost → 设置 → AI 对话模型 配 LLM → 设置 → 插件设置 开 `enable_diagram_redraw`（并填 `vision_model`，如火山方舟 `doubao-seed-2.0-pro`）→ 开始用。
+
+> 飞书导入需要容器内可用 `lark-cli`（Node）且已 `auth login` 授权。当前镜像未内置 lark-cli，飞书导入在容器内会优雅回退通用抓取——本地跑或后续镜像内置后完整生效。详见路线图。
 
 ---
 
 ## Roadmap
 
-### v1.1 — current
+### v1.2 — current (this fork)
+- ✅ Feishu/Lark doc import (docx/wiki → Markdown, whiteboard recovery via lark-cli)
+- ✅ d2 diagram-redraw engine (vision model → topology → d2 lays out → SVG); replaces fireworks + hand-layout
+- ✅ `enable_diagram_redraw` master switch + `vision_model` / per-article image cap settings
 - ✅ WeChat Channels (视频号) capture
 - ✅ Smart generic extraction (trafilatura → headless render → BeautifulSoup)
 - ✅ Article-scoped Q&A (📄 this-article / 📚 whole-library toggle)
+
+### v1.1
+- 🔜 **Feishu auth into container** — npm-install `@larksuite/cli` in the image + file-based `app-secret-stdin` (no macOS Keychain) so containerized deploys get full Feishu import without host lark-cli
+- 🔜 **Image import fix** — current article image handling has known issues (hotlink-proxy + base64 data-URI bloat on large articles); add a static-image store + cleanup
+- 🔜 **Info/source import** — import external info sources beyond article URLs
+- 🔜 Browser extension (one-click clip from any tab)
+- 🔜 Pocket / Omnivore import
+- 🔜 Better article deduplication
+- 🔜 PWA support for "add to home screen" on mobile
 
 ### v1.0
 - ✅ Multi-platform capture (8+ sources)
@@ -425,14 +420,7 @@ docker compose up -d
 - ✅ Self-host via Docker
 - ✅ Responsive UI for PC / pad / mobile
 
-### v1.1
-- 🔜 Browser extension (one-click clip from any tab)
-- 🔜 Image local download (offline-safe backup)
-- 🔜 Pocket / Omnivore import
-- 🔜 Better article deduplication
-- 🔜 PWA support for "add to home screen" on mobile
-
-### v1.2
+### v1.3+
 - More LLM providers (Claude, Gemini, Doubao native)
 - Per-user theme & language preferences
 - Bulk re-process articles with new AI prompts
@@ -452,7 +440,7 @@ docker compose up -d
 <details>
 <summary><strong>Will Trove AI work without paying for an LLM API?</strong></summary>
 
-Yes — embedding has a local CPU-only fallback (`BAAI/bge-small-en-v1.5`, 384-dim).
+Yes — embedding has a local CPU-only fallback (`BAAI/bge-small-zh-v1.5`, 512-dim).
 For LLM features (summary, tags, RAG), you need at least a free-tier API:
 - **DeepSeek** — cheapest at ~$0.27 / 1M tokens
 - **讯飞 / 智谱** — both offer free trial credits

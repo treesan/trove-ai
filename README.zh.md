@@ -38,14 +38,15 @@
 <td width="50%" valign="top">
 
 #### 📥 全平台采集
-微信公众号 · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金,以及任何支持 OpenGraph 的网页。
+微信公众号 · 头条 · 抖音 · 小红书 · B 站 · Medium · CSDN · 掘金 · **飞书文档(docx/wiki)**,以及任何支持 OpenGraph 的网页。
+飞书链接经 `lark-cli` 官方 API 取干净 Markdown、画板还原为结构化图表;无解析器的 JS 页(视频号 / CSDN / Medium …)走 *trafilatura → headless 渲染 → BeautifulSoup* 级联。
 入库方式:浏览器一键收藏 · 微信 Bot 转发 · 粘贴正文 · 上传文件(PDF/DOCX/EPUB)· 一句话灵感 Spark 生成。
 
 </td>
 <td width="50%" valign="top">
 
 #### 🧠 AI 替你干活
-每篇文章自动生成:AI 提取标题 · 5 句话摘要 · 3-5 个关键点 · 自动标签 · 平台感知作者识别 · 1024 维向量嵌入 · 思维导图 · 视频转译。
+每篇文章自动生成:AI 提取标题 · 5 句话摘要 · 3-5 个关键点 · 自动标签 · 平台感知作者识别 · 本地向量嵌入(bge-small-zh-v1.5)· 思维导图 · 视频转译。**📊 图表重绘:微信文章里的架构图/流程图/思维导图,由视觉模型识别拓扑 → d2 布局引擎自动渲染为清晰 SVG,不再模糊不可检索。**
 
 </td>
 </tr>
@@ -178,8 +179,8 @@ Trove AI 是**唯一**同时拥有这些能力的产品:深度中文平台支持
 ### 步骤
 
 ```bash
-# 1. 克隆
-git clone https://github.com/weaiw/trove-ai.git
+# 1. 克隆(含视频 ASR + YouTube + DeepSeek + 飞书导入 + d2 图表重绘)
+git clone https://github.com/treesan/trove-ai.git
 cd trove-ai
 
 # 2. 配置密钥
@@ -242,7 +243,7 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
         │  PostgreSQL 16     │ │  Redis 7       │  │ 外部 API          │
         │  + pgvector        │ │  (缓存)        │  │ LLM + 嵌入        │
         │  • articles        │ │                │  │ • DeepSeek        │
-        │  • embeddings 1024 │ │                │  │ • 讯飞 / OpenAI   │
+        │  • embeddings 512 │ │                │  │ • 讯飞 / OpenAI   │
         │  • knowledge_edges │ │                │  │ • SiliconFlow     │
         │  • users + tokens  │ │                │  │ • 任意 兼容厂商   │
         └────────────────────┘ └────────────────┘  └───────────────────┘
@@ -256,9 +257,10 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 | 后端 | **FastAPI** + SQLAlchemy async + pydantic | 原生 async · 类型安全 · 自动生成 OpenAPI 文档 |
 | 数据库 | **PostgreSQL 16** + **pgvector** | 一个 DB 既存关系数据又存向量 |
 | 缓存 | **Redis 7** | session / 队列 |
-| 爬虫 | **Playwright** + **curl_cffi** + httpx | 突破中文反爬(TLS 指纹 / XHR 拦截 / JS VM 绕过) |
+| 爬虫 | **Playwright** + **curl_cffi** + httpx + **lark-cli** | 突破中文反爬(TLS 指纹 / XHR 拦截 / JS VM 绕过);lark-cli 提供飞书官方 API 访问 |
 | LLM | 任意 **OpenAI 兼容** | DeepSeek · 讯飞星辰 · OpenAI · SiliconFlow · MiniMax · 智谱 · ... |
-| 嵌入 | **SiliconFlow bge-m3** (1024 维) 或本地 fastembed (384 维) | 云端质量,带本地兜底 |
+| 嵌入 | **本地 fastembed bge-small-zh-v1.5**(512 维)或 SiliconFlow bge-m3(1024 维) | 云端质量,带本地 CPU 兜底 |
+| 图表重绘 | **d2**(dagre 布局)+ 可选视觉模型 | 微信/飞书图表自动重绘为 SVG;LLM 只出拓扑,d2 自动布局 |
 | 反代 | **Nginx** | 单一入口 · 静态资源加速 |
 
 ---
@@ -273,6 +275,7 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 |------|--------|
 | LLM 厂商 + Key + 模型 | 系统管理 → AI 对话模型 |
 | 嵌入厂商 + Key + 模型 | 系统管理 → 嵌入模型 |
+| 图表重绘开关 · 视觉模型 · 单篇图片上限 | 系统管理 → 插件设置 |
 | 缓存清理 / 重建 | 系统管理 → 系统缓存 |
 | Obsidian 同步 Token | 个人设置 → Obsidian 备份 |
 | 微信 Bot 绑定 | 个人设置 → 微信 |
@@ -300,10 +303,11 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 | 端点 | 用途 |
 |------|------|
 | `POST /api/auth/login` | 用户登录 → JWT |
-| `POST /api/articles` | 按 URL 添加文章 |
+| `POST /api/articles` | 按 URL 添加文章(含飞书 docx/wiki 链接) |
 | `POST /api/articles/upload` | 上传文件(PDF / Word / EPUB / 等) |
 | `POST /api/articles/notes` | 写一篇笔记 |
 | `POST /api/articles/spark` | 一句话 → AI 生成文章 |
+| `POST /api/articles/{id}/redraw-diagrams` | 手动(重新)触发图表重绘 |
 | `POST /api/assistant/ask` | 基于你库的 RAG 问答 |
 | `GET /api/knowledge/graph` | 知识图谱数据 |
 | `POST /api/learning/paths/generate` | 生成学习路径 |
@@ -341,9 +345,61 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 
 ---
 
+## 本仓库变更(相对上游)
+
+本仓库([treesan/trove-ai](https://github.com/treesan/trove-ai))fork 自 [simonlin000/trove-ai](https://github.com/simonlin000/trove-ai)(后者又 fork 自 [weaiw/trove-ai](https://github.com/weaiw/trove-ai))。在上游基础上叠加:
+
+### 📄 飞书文档导入
+
+识别 `feishu.cn` / `larksuite.com` 链接,经 `lark-cli` 调用官方 API 取 docx/wiki → 干净 Markdown 直出(标题/列表/callout/引用保真)。**画板内容不再丢失**:`whiteboard +query --output_as raw` 取结构化节点+连线 → 喂给图表重绘引擎重新渲染为清晰 SVG;重绘失败回退画板导出图,文本始终保留作可检索兜底。任一环节失败优雅回退通用抓取,绝不崩溃。
+
+### 📊 d2 图表重绘引擎
+
+微信公众号里的架构图/流程图/思维导图多为扁平位图——模糊、不可检索。**视觉模型识别图表类图片 → 提取拓扑 → d2(dagre 布局引擎)自动算坐标渲染 SVG → 内嵌回正文**。LLM 只描述 `a -> b -> c` 拓扑,不再死磕坐标(旧 fireworks 引擎要 LLM 喂每个节点 x/y/width/height,反复出布局 bug)。照片保留原样;失败保留原图。重绘后台异步执行(独立 db session),文章秒进、图表稍后升级。受单一总开关 `enable_diagram_redraw` 门控,默认关闭。
+
+> 设计与实现全过程以 OpenSpec 管理,见 `openspec/`(飞书导入 `feishu-doc-import`、图表重绘 `diagram-regeneration`,含已归档 change 的设计文档与决策记录)。
+
+### 上游继承(Simon fork)
+
+- 🎬 视频 ASR 语音转录(B 站 & YouTube → 完整文字稿)
+- 📺 YouTube 完整支持(yt-dlp + 中文字幕优先 + ASR 兜底)
+- 🧠 DeepSeek V4-Pro 驱动
+- ⚙️ UI 配置化(设置 → 插件设置,开关即时生效)
+- 🔄 Obsidian 双向同步(`POST /api/sync/articles` 推回端点)
+
+### 从本仓库部署
+
+```bash
+git clone https://github.com/treesan/trove-ai.git
+cd trove-ai
+cp .env.example .env
+# 编辑 .env,至少填 SECRET_KEY 和 POSTGRES_PASSWORD
+docker compose up -d
+```
+
+打开 http://localhost → 设置 → AI 对话模型 配 LLM → 设置 → 插件设置 开 `enable_diagram_redraw`(并填 `vision_model`,如火山方舟 `doubao-seed-2.0-pro`)→ 开始用。
+
+> 飞书导入需要容器内可用 `lark-cli`(Node)且已 `auth login` 授权。当前镜像未内置 lark-cli,飞书导入在容器内会优雅回退通用抓取——本地跑或后续镜像内置后完整生效。详见路线图。
+
+---
+
 ## 路线图
 
-### v1.0 — 当前版本
+### v1.2 — 当前版本(本 fork)
+- ✅ 飞书文档导入(docx/wiki → Markdown,画板经 lark-cli 还原)
+- ✅ d2 图表重绘引擎(视觉模型 → 拓扑 → d2 布局 → SVG),取代 fireworks + 手算坐标
+- ✅ `enable_diagram_redraw` 总开关 + `vision_model` / 单篇图片上限设置
+
+### v1.1 — 下一步
+- 🔜 **飞书授权进容器** — 镜像内 npm 装 `@larksuite/cli` + 文件式 `app-secret-stdin`(避开 macOS Keychain),容器化部署无需宿主 lark-cli 即可完整飞书导入
+- 🔜 **图片导入修复** — 当前文章图片处理有已知问题(防盗链代理 + 大文章 base64 data-URI 膨胀),加静态图片存储 + 清理
+- 🔜 **Info / 资源导入** — 支持文章 URL 以外的外部信息源导入
+- 🔜 浏览器扩展(任意标签一键收藏)
+- 🔜 Pocket / Omnivore 导入
+- 🔜 文章去重增强
+- 🔜 PWA 支持(手机"添加到主屏幕")
+
+### v1.0
 - ✅ 全平台采集(8+ 来源)
 - ✅ AI 处理流水线(摘要 / 关键点 / 标签 / 嵌入 / 思维导图)
 - ✅ RAG 问答 + 语义搜索
@@ -354,14 +410,7 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 - ✅ Docker 自部署
 - ✅ PC / pad / 移动端响应式 UI
 
-### v1.1
-- 🔜 浏览器扩展(任意标签一键收藏)
-- 🔜 图片本地下载(完全离线备份)
-- 🔜 Pocket / Omnivore 导入
-- 🔜 文章去重增强
-- 🔜 PWA 支持(手机"添加到主屏幕")
-
-### v1.2
+### v1.3+
 - 更多 LLM 厂商(Claude · Gemini · 豆包原生)
 - 用户主题与语言偏好
 - 批量重新处理文章(用新 AI Prompt)
@@ -381,7 +430,7 @@ HTTPS 自己用 **Caddy / Traefik / Nginx** 反代,或者直接挂 Cloudflare Tu
 <details>
 <summary><strong>不付钱买 LLM API 能用吗?</strong></summary>
 
-可以——嵌入有本地纯 CPU 兜底(`BAAI/bge-small-en-v1.5`,384 维)。
+可以——嵌入有本地纯 CPU 兜底(`BAAI/bge-small-zh-v1.5`,512 维)。
 LLM 功能(摘要/标签/RAG)至少要一个免费层 API:
 - **DeepSeek** — 最便宜,约 ¥2 / 100 万 token
 - **讯飞 / 智谱** — 都有免费额度
