@@ -1920,6 +1920,92 @@ class ParserService:
         """Estimate reading time in minutes."""
         return max(1, round(word_count / 300))
 
+    def strip_ad_images(self, markdown: str, platform: str) -> str:
+        """删除微信文章中的广告图片(cross-article 卡片 + 尾部广告锚点之后的图片)。
+
+        Layer 1: 删除 image-wrapped 跨文章推荐卡片
+            [![alt](img)](https://mp.weixin.qq.com/s?...&scene=21#wechat_redirect)
+        Layer 2: 找尾部广告锚点(配置列表),删除锚点之后所有 ![…]() 图片行,保留文字。
+
+        仅 wechat 平台生效; 受 enable_wechat_ad_strip 开关控制(默认开)。
+        """
+        if platform != 'wechat' or not markdown:
+            return markdown
+        if not _get_plugin_bool("enable_wechat_ad_strip", True):
+            return markdown
+
+        # ── Layer 1: image-wrapped 跨文章推荐卡片 ───────────────────
+        # 匹配 [![alt](img)](mp.weixin.qq.com/s?…#wechat_redirect)
+        # 仅删 image-wrapped 形式; 纯文字 [text](…redirect) 保留, 避免误伤.
+        _CROSS_CARD_RE = re.compile(
+            r'\[[!]\[[^\]]*\]\([^)]*\)\]'           # [![alt](img)]
+            r'\(https://mp\.weixin\.qq\.com/s\?'     # (https://mp.weixin.qq.com/s?
+            r'[^)]*#wechat_redirect\)',              # ...#wechat_redirect)
+        )
+        layer1_removed = len(_CROSS_CARD_RE.findall(markdown))
+        markdown = _CROSS_CARD_RE.sub('', markdown)
+
+        # ── Layer 2: 尾部广告锚点之后的图片 ─────────────────────────
+        anchors = [
+            a.strip() for a in
+            _get_plugin_str(
+                "wechat_ad_strip_anchors",
+                "感谢你读到这里,扫码领取,关注公众号,关注一下,加微信,"
+                "职业救助站,技术自由圈,代金券,点赞收藏,在看,高薪offer",
+            ).split(',')
+            if a.strip()
+        ]
+
+        anchor_pos = -1
+        matched_anchor = None
+        doc_len = len(markdown)
+        _TAIL_THRESHOLD = 0.90  # 锚点须在文档 90%+ 位置出现过,否则视为正文引用(如作者简介/行内推广)而非尾部广告
+        for anchor in anchors:
+            # 搜索所有出现位置,取尾部区域(≥90%)中最早的那个
+            pos = 0
+            while True:
+                p = markdown.find(anchor, pos)
+                if p == -1:
+                    break
+                if p >= doc_len * _TAIL_THRESHOLD:
+                    if anchor_pos == -1 or p < anchor_pos:
+                        anchor_pos = p
+                        matched_anchor = anchor
+                    break  # 找到该锚点在尾部的最早出现即可,无需继续
+                pos = p + 1
+
+        layer2_removed = 0
+        if anchor_pos != -1:
+            before = markdown[:anchor_pos]
+            after = markdown[anchor_pos:]
+            # 删除尾部区域中的图片: 独立图片行整行删除,行内图片只删 ![…]() 部分保留文字
+            _IMG_MD_RE = re.compile(r'!\[[^\]]*\]\([^)]*\)')
+            kept_lines = []
+            for line in after.split('\n'):
+                if _IMG_MD_RE.search(line):
+                    # 行内也有文字 → 只删图片标记,保留文字
+                    cleaned = _IMG_MD_RE.sub('', line).strip()
+                    if cleaned:
+                        kept_lines.append(cleaned)
+                    else:
+                        layer2_removed += 1  # 整行只有图片,删掉
+                else:
+                    kept_lines.append(line)
+            markdown = before + '\n'.join(kept_lines)
+
+        # 清理连续空行
+        markdown = re.sub(r'\n{3,}', '\n\n', markdown).strip()
+
+        if layer1_removed or layer2_removed:
+            logger.info(
+                f"wechat ad-strip: layer1={layer1_removed} cards, "
+                f"layer2={layer2_removed} images (anchor={matched_anchor})"
+            )
+        elif matched_anchor is None:
+            logger.debug("wechat ad-strip: no anchor matched, skipping")
+
+        return markdown
+
 
 # ============================================================
 #  WeChat (微信公众号) cgiDataNew 解析器
