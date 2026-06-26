@@ -521,11 +521,19 @@ class LLMService:
                         emb = data.get("data", [{}])[0].get("embedding", [])
                         if emb:
                             return emb
-                    logger.warning(f"API embedding failed ({resp.status_code}), falling back to local")
+                    logger.warning(f"API embedding failed ({resp.status_code}); skipping (leave NULL for backfill)")
             except Exception as e:
-                logger.warning(f"API embedding error: {e}, falling back to local")
-        
-        # Fallback to local model
+                logger.warning(f"API embedding error: {e}; skipping (leave NULL for backfill)")
+            # ponytail: do NOT fall back to the local 512-dim model when an API model is
+            # configured. The local model lives in a different vector space AND (for bge-m3)
+            # a different dimension (1024 vs 512) — writing it would either crash the DB
+            # insert or pollute similarity search. Leave the row NULL; auto-backfill retries
+            # via the API. Only the local-only config path uses the local model below.
+            if provider == "local":
+                return generate_local_embedding(text)
+            return []
+
+        # Fallback to local model (provider == "local")
         return generate_local_embedding(text)
 
     async def _vision_chat(self, prompt: str, image_url: str, temperature: float = 0.2) -> Optional[str]:
