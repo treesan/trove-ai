@@ -32,4 +32,3 @@ json-repair>=0.30.0
 qrcode[pil]>=7.4.0
 faster-whisper>=1.0.0
 yt-dlp>=2024.0.0
-cairosvg>=2.7.0  # 图表重绘 SVG→PNG (镜像已含 libcairo2)

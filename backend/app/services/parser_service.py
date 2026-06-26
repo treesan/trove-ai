@@ -455,12 +455,12 @@ class ParserService:
             processed += 1
             try:
                 vision_url = self._proxy_to_absolute(src)
-                spec = await llm_service.classify_and_extract_diagram(vision_url)
-                if not spec:
-                    continue
-                data_uri = await render_diagram(spec)
+                dsl = await llm_service.classify_and_extract_diagram(vision_url)
+                if not dsl:
+                    continue  # 照片/截图/未配置视觉模型 → 原样
+                data_uri = await render_diagram(dsl)
                 if not data_uri:
-                    continue
+                    continue  # 重绘失败 → 保留原图
                 inserts.append((m.end(), f"\n\n![重绘图表]({data_uri})"))
             except Exception as e:
                 logger.warning(f"wechat redraw failed for one image (kept original): {e}")
@@ -548,11 +548,10 @@ class ParserService:
                     "--whiteboard-token", token, "--output_as", "raw",
                 ], timeout=90)
                 nodes = ((raw or {}).get("data") or {}).get("nodes") or []
-                spec = _whiteboard_nodes_to_spec(nodes)
-                if spec:
-                    text_outline = _whiteboard_text_outline(spec)
+                dsl, text_outline = _whiteboard_to_d2(nodes)
+                if dsl:
                     # 图表重绘默认关闭: 关闭时跳过 SVG 渲染, 回退画板导出图 (原图)
-                    data_uri = await render_diagram(spec) if _get_plugin_bool("enable_diagram_redraw", False) else None
+                    data_uri = await render_diagram(dsl) if _get_plugin_bool("enable_diagram_redraw", False) else None
                     if data_uri:
                         # 重绘成功: 图表 + 提取文本 (保证可检索)
                         replacement = f"![白板图表]({data_uri})"
@@ -2380,10 +2379,17 @@ def _render_pay_preview(cgi_data: dict) -> str:
 _WHITEBOARD_TAG_RE = re.compile(r'<whiteboard\s+token="([^"]+)"\s*/?>')
 
 
-def _whiteboard_nodes_to_spec(nodes: list) -> Optional[dict]:
-    """把 whiteboard raw nodes 映射为图表引擎的 {nodes, arrows} spec。
-    text_shape → node(label), connector → arrow(source→target)。无文本则 None。"""
-    spec_nodes = []
+def _whiteboard_to_d2(nodes: list) -> tuple[Optional[str], str]:
+    """把 whiteboard raw nodes 拼成 D2 DSL 文本。
+
+    text_shape → `id: label`, connector → `source -> target`。d2 的 dagre 负责
+    布局, 丢弃画板原图坐标 (重排通常更清晰)。含特殊字符的 label 用引号包裹。
+    返回 (dsl, text_outline): 无文本节点时 dsl=None; text_outline 永远是提取的
+    文本列表 (重绘失败/关闭时作可检索兜底)。"""
+    # D2 里需引号包裹的字符: 冒号(键值分隔)、->、花括号、换行、井号
+    _QUOTE_RE = re.compile(r'[:\-{}#\n]')
+
+    labels = []  # (id, label) 按出现顺序
     id_set = set()
     for n in nodes:
         if n.get("type") != "text_shape":
@@ -2393,36 +2399,35 @@ def _whiteboard_nodes_to_spec(nodes: list) -> Optional[dict]:
             continue
         nid = n.get("id")
         id_set.add(nid)
-        spec_nodes.append({
-            "id": nid,
-            "label": label,
-            # 透传画板坐标, 渲染器可据此布局 (缺失则渲染器自动排布)
-            "x": n.get("x"), "y": n.get("y"),
-        })
-    if not spec_nodes:
-        return None
+        labels.append((nid, label))
+    if not labels:
+        return None, ""
 
-    spec_arrows = []
+    text_outline = "\n".join(f"- {l}" for _, l in labels)
+
+    lines = []
+    seen = set()
+    for nid, label in labels:
+        # id 可能含冒号/特殊字符 → 用引号包裹成合法 D2 key
+        key = f'"{nid}"' if _QUOTE_RE.search(str(nid)) else str(nid)
+        val = label.replace('"', '\\"')
+        if _QUOTE_RE.search(val):
+            val = f'"{val}"'
+        lines.append(f"{key}: {val}")
+        seen.add(nid)
+
     for n in nodes:
         if n.get("type") != "connector":
             continue
         conn = n.get("connector") or {}
         src = ((conn.get("start") or {}).get("attached_object") or {}).get("id")
         tgt = ((conn.get("end") or {}).get("attached_object") or {}).get("id")
-        # 只保留两端都是已知文本节点的连线
-        if src in id_set and tgt in id_set:
-            spec_arrows.append({"source": src, "target": tgt})
+        if src in id_set and tgt in id_set and src != tgt:
+            skey = f'"{src}"' if _QUOTE_RE.search(str(src)) else str(src)
+            tkey = f'"{tgt}"' if _QUOTE_RE.search(str(tgt)) else str(tgt)
+            lines.append(f"{skey} -> {tkey}")
 
-    return {"nodes": spec_nodes, "arrows": spec_arrows,
-            "template_type": "mind-map", "style": 1}
-
-
-def _whiteboard_text_outline(spec: dict) -> str:
-    """画板文本兜底: 重绘失败时附上提取的文本列表, 保证内容可检索。"""
-    labels = [n["label"] for n in spec.get("nodes", []) if n.get("label")]
-    if not labels:
-        return ""
-    return "\n".join(f"- {l}" for l in labels)
+    return "\n".join(lines), text_outline
 
 
 # 飞书 Markdown 里带 url 的内嵌图片标签 → 标准 markdown 图片

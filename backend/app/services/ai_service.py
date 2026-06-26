@@ -570,43 +570,44 @@ class LLMService:
             logger.warning(f"vision chat failed: {e}")
         return None
 
-    async def classify_and_extract_diagram(self, image_url: str) -> Optional[Dict[str, Any]]:
-        """Classify an article image and, if it's a diagram, extract a redraw spec.
+    async def classify_and_extract_diagram(self, image_url: str) -> Optional[str]:
+        """Classify an article image and, if it's a diagram, extract D2 DSL.
 
         Returns None when: no vision model configured, the image is a photo/
         screenshot (not a diagram), or extraction fails — caller keeps original.
-        On success returns a fully-laid-out spec {nodes, arrows, style,
-        template_type, canvas} for the engine — the LLM places coordinates and
-        sizes nodes itself, per the fireworks skill's layout rules.
+        On success returns a D2 DSL string (topology like `a -> b -> c`) — d2
+        does the layout, so the LLM only describes nodes and edges, no coords.
         """
         prompt = (
-            "你是技术图表识别与布局专家。先判断这张图片是否为架构图/流程图/思维导图"
-            "等结构化图表（而非照片、截图、装饰图、代码截图）。不是则只返回 "
-            "{\"is_diagram\": false}。\n\n"
-            "如果是结构化图表，提取其结构并**自己完成布局**，返回严格 JSON（不要 markdown 代码块）。"
-            "你必须为每个节点计算坐标和尺寸，遵守以下规则：\n"
-            "1. 画布：默认 960×700 容不下时放大画布（宁可放大画布也别挤），用 \"canvas\": {\"width\":960,\"height\":700} 指定。\n"
-            "2. 节点尺寸：每个节点必须带 x,y,width,height。宽度按文字算：中文每字约 22px（18px 字体），"
-            "长标签用 label(标题,一行) + sublabel(补充说明,一行小字) 拆分，切勿把多行塞进一个 label。\n"
-            "3. label 最多一行、不超过约 12 个字；超出的内容放 sublabel。\n"
-            "4. 间距：同层节点水平间距 ≥80px，层间距 ≥120px，画布边距 ≥40px，节点间留 ≥60px。\n"
-            "5. 坐标对齐 8 的倍数。节点不要重叠、不要压住其它节点或标题。\n"
-            "返回格式：\n"
-            '{"is_diagram": true, "template_type": "flowchart|architecture|mind-map", '
-            '"style": 1, "title": "图表标题", "canvas": {"width": 960, "height": 700}, '
-            '"nodes": [{"id": "n1", "label": "用户提问", "sublabel": "补充说明", '
-            '"x": 56, "y": 40, "width": 200, "height": 80}], '
-            '"arrows": [{"source": "n1", "target": "n2"}]}'
+            "你是技术图表识别专家。先判断这张图片是否为架构图/流程图/思维导图等"
+            "结构化图表（而非照片、截图、装饰图、代码截图）。\n"
+            "不是结构化图表 → 只回复一个词：NODIAGRAM\n"
+            "是结构化图表 → 提取其结构，用 D2 DSL 文本描述（不要 JSON、不要 markdown 代码块、"
+            "不要任何解释，只输出 DSL 本身）。规则：\n"
+            "- 节点：`ID: 标签`（ID 用英文/拼音短词如 user/llm/grep，标签用中文）\n"
+            "- 连接：`A -> B: 关系描述`（关系描述可省略）\n"
+            "- 含冒号或特殊字符的标签用双引号包裹，如 `step1: \"输入: 解析URL\"`\n"
+            "- 保持原图的拓扑结构和流向，节点标签简短（≤10字），长说明放连接的冒号后\n"
+            "示例输出：\n"
+            "user: 用户提问\n"
+            "llm: LLM分析需求\n"
+            "user -> llm\n"
+            "llm -> grep: 调用搜索\n"
+            "grep -> llm: 返回结果"
         )
         result = await self._vision_chat(prompt, image_url)
         if not result:
             return None
-        parsed = _parse_llm_json(result)
-        if not parsed or not parsed.get("is_diagram"):
+        result = result.strip()
+        if not result or result.startswith("NODIAGRAM"):
             return None
-        if not parsed.get("nodes"):
+        # 剥可能的 markdown 代码块包裹 (LLM 偶尔会加)
+        result = re.sub(r"^```(?:d2)?\s*\n?", "", result)
+        result = re.sub(r"\n?```\s*$", "", result).strip()
+        # 必须含 D2 的核心语法 (节点或连线) 才算有效
+        if "->" not in result and ":" not in result:
             return None
-        return parsed
+        return result
 
     async def generate_mindmap(self, content: str, title: str) -> Dict[str, Any]:
         """Generate a hierarchical mind map from article content.

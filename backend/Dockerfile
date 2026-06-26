@@ -11,6 +11,17 @@ ENV PIP_INDEX_URL=https://mirrors.tencent.com/pypi/simple/ \
 
 RUN apt-get update && apt-get install -y --no-install-recommends     build-essential libpq-dev curl libcurl4-openssl-dev     libnss3 libnspr4 libatk-bridge2.0-0 libdrm2 libdbus-1-3     libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3     libxrandr2 libgbm1 libpango-1.0-0 libcairo2 libasound2     libatspi2.0-0 libcups2 nodejs ffmpeg &&     rm -rf /var/lib/apt/lists/*
 
+# d2 diagram engine (DAG layout). Used by diagram_service to render DSL→SVG.
+# libcairo2 stays: Chromium (playwright) links it.
+# ponytail: pinned release tarball via ghfast.top mirror (github.com blocked from
+# CN build host); bundled dagre layout; upgrade path = bump version / mirror.
+ARG D2_VERSION=0.7.1
+RUN curl -fsSL "https://ghfast.top/https://github.com/terrastruct/d2/releases/download/v${D2_VERSION}/d2-v${D2_VERSION}-linux-amd64.tar.gz" \
+    -o /tmp/d2.tgz && tar -xzf /tmp/d2.tgz -C /tmp && \
+    mv /tmp/d2-v${D2_VERSION}/bin/d2 /usr/local/bin/d2 && \
+    chmod +x /usr/local/bin/d2 && rm -rf /tmp/d2.tgz /tmp/d2-v* && \
+    d2 --version
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
